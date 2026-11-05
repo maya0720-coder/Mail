@@ -12,7 +12,8 @@ def main():
     parser = argparse.ArgumentParser(description="로컬 메일 업무 비서")
     parser.add_argument("--config", help="설정 JSON 경로")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("serve", help="로컬 웹 화면")
+    web = sub.add_parser("serve", help="로컬 웹 화면")
+    web.add_argument("--open-browser", action="store_true", help="시작 후 기본 브라우저 열기")
     sub.add_parser("demo", help="가상 메일 5건 수집")
     sub.add_parser("wiki", help="프로젝트 위키 갱신")
     imp = sub.add_parser("import", help="JSON 또는 EML 파일/폴더 수집")
@@ -30,12 +31,12 @@ def main():
     search.add_argument("query")
     args = parser.parse_args()
     cfg = load_config(args.config)
+    if args.command == "serve":
+        from mailbrain.launcher import launch
+        launch(cfg, open_browser=args.open_browser)
+        return
     store = Store(cfg["data_dir"])
     pipeline = Pipeline(cfg, store)
-    if args.command == "serve":
-        from mailbrain.web import serve
-        serve(cfg, store, pipeline)
-        return
     if args.command == "demo":
         from mailbrain.demo import messages
         result = pipeline.ingest(messages(cfg["user_email"]))

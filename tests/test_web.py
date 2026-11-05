@@ -7,7 +7,7 @@ import unittest
 from urllib.request import Request, build_opener, ProxyHandler
 from urllib.error import HTTPError
 from unittest.mock import patch
-from http.server import HTTPServer
+from http.server import ThreadingHTTPServer
 
 from mailbrain.core import Store, Pipeline
 from mailbrain.web import serve
@@ -25,7 +25,7 @@ class WebTests(unittest.TestCase):
         cls.ready = threading.Event()
 
         def factory(*args, **kwargs):
-            cls.server = HTTPServer(*args, **kwargs)
+            cls.server = ThreadingHTTPServer(*args, **kwargs)
             cls.ready.set()
             return cls.server
 
@@ -58,6 +58,39 @@ class WebTests(unittest.TestCase):
         with self.assertRaises(HTTPError) as error:
             self.request("/api/state")
         self.assertEqual(error.exception.code, 403)
+
+    def test_health_identifies_same_app_without_revealing_account(self):
+        from mailbrain.launcher import running_instance
+        with self.request('/healthz') as response:health=json.load(response)
+        self.assertEqual(health['app'],'mailbrain')
+        self.assertTrue(running_instance(self.port,health))
+        self.assertFalse(running_instance(self.port,{**health,'instance':'different'}))
+        self.assertNotIn('me@example.com',json.dumps(health))
+
+    def test_solution_does_not_block_other_screen_requests(self):
+        from mailbrain.solutions import Solutions
+        entered,release=threading.Event(),threading.Event()
+        failures=[]
+        def slow(*args,**kwargs):
+            entered.set()
+            release.wait(4)
+            return {'ok':True}
+        def call():
+            try:
+                with self.request('/api/solution',{}, {'X-App-Token':self.token}) as response:json.load(response)
+            except Exception as exc:failures.append(exc)
+        with patch.object(Solutions,'generate',side_effect=slow):
+            thread=threading.Thread(target=call)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                with self.request('/api/state',headers={'X-App-Token':self.token}) as response:
+                    self.assertIn('tasks',json.load(response))
+                self.assertFalse(release.is_set())
+            finally:
+                release.set()
+                thread.join(5)
+        self.assertEqual(failures,[])
 
     def test_host_boundary(self):
         with self.assertRaises(HTTPError) as error:

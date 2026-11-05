@@ -16,6 +16,6 @@ if not defined PY (
     exit /b 1
 )
 if not exist config.json copy config.example.json config.json >nul
-echo Open the local URL printed below in your browser after startup.
-%PY% app.py serve
+echo Starting Mail Brain. An existing instance will be reused.
+%PY% app.py serve --open-browser
 if errorlevel 1 pause

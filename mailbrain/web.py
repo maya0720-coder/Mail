@@ -1,6 +1,6 @@
 import json
 import secrets
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 from .core import ROOT, dump
@@ -8,17 +8,20 @@ from .demo import messages
 from .sync import SyncManager
 
 
-class LocalHTTPServer(HTTPServer):
+class LocalHTTPServer(ThreadingHTTPServer):
     # Windows에서 같은 포트의 이전 서버와 겹쳐 실행되는 것을 막습니다.
     allow_reuse_address = False
 
 
-def serve(cfg, store, pipeline):
+def serve(cfg, store, pipeline, on_ready=None, health=None):
     token = secrets.token_urlsafe(32)
     port = int(cfg.get("port", 18765))
     sync = SyncManager(cfg, store, pipeline)
     from .solutions import Solutions
     solutions = Solutions(cfg, store)
+    if health is None:
+        from .launcher import identity, revision
+        health = {"app": "mailbrain", "instance": identity(cfg), "revision": revision()}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
@@ -42,6 +45,8 @@ def serve(cfg, store, pipeline):
             if not self.host_ok():
                 return self.reply({"error": "허용하지 않는 호스트입니다."}, 403)
             route = urlparse(self.path)
+            if route.path == "/healthz":
+                return self.reply(health)
             if route.path == "/":
                 html = (ROOT / "static/index.html").read_text(encoding="utf-8").replace("__CSRF_TOKEN__", token)
                 return self.reply(html, kind="text/html; charset=utf-8")
@@ -155,6 +160,8 @@ def serve(cfg, store, pipeline):
     print(f"메일 브레인: http://127.0.0.1:{port}  / 종료: Ctrl+C")
     print(f"분석 모드: {cfg['engine']} / 로컬 사용자: {cfg['user_email']}")
     try:
+        if on_ready:
+            on_ready()
         server.serve_forever()
     except KeyboardInterrupt:
         pass
