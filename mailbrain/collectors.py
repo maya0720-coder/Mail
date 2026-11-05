@@ -33,6 +33,35 @@ class TextHTML(HTMLParser):
             self.parts.append(data)
 
 
+def _outlook_body(item):
+    """Return Outlook's plain body, falling back to text extracted from HTML."""
+    body = str(item.Body or "")
+    if body.strip():
+        return body
+    html = str(item.HTMLBody or "")
+    if not html.strip():
+        return body
+    parser = TextHTML()
+    parser.feed(html)
+    return "".join(parser.parts).strip()
+
+
+def watch_outlook_new_mail(callback):
+    """Subscribe to Outlook's NewMailEx event; caller must pump COM messages."""
+    try:
+        import win32com.client
+    except ImportError as exc:
+        raise ValueError("실시간 Outlook 알림에는 pywin32가 필요합니다. requirements.txt를 설치한 Python 환경으로 앱을 실행하세요.") from exc
+
+    class OutlookEvents:
+        def OnNewMailEx(self, entry_ids):
+            callback()
+
+    application = win32com.client.Dispatch("Outlook.Application")
+    sink = win32com.client.WithEvents(application, OutlookEvents)
+    return application, sink
+
+
 def read_eml(path):
     raw = Path(path).read_bytes()
     mail = BytesParser(policy=policy.default).parsebytes(raw)
@@ -93,7 +122,9 @@ def _outlook_namespace():
     try:
         return win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
     except Exception as exc:
-        raise ValueError("Classic Outlook에 연결하지 못했습니다. 본인 Windows 세션에서 Outlook을 열고 초기 설정과 로그인을 마친 뒤 다시 연결하세요.") from exc
+        hresult = getattr(exc, "hresult", None)
+        code = f" (HRESULT 0x{hresult & 0xFFFFFFFF:08X})" if isinstance(hresult, int) else ""
+        raise ValueError(f"Classic Outlook에 연결하지 못했습니다{code}. Outlook과 이 앱을 같은 일반 사용자 Windows 세션에서 실행하고, 관리자 권한이나 서비스 세션을 섞지 마세요.") from exc
 
 
 def _outlook_account(namespace, cfg):
@@ -106,7 +137,10 @@ def _outlook_account(namespace, cfg):
 
 
 def outlook_probe(cfg):
-    import pythoncom
+    try:
+        import pythoncom
+    except ImportError as exc:
+        raise ValueError("Outlook 수집에는 pywin32가 필요합니다. requirements.txt를 설치한 Python 환경으로 앱을 실행하세요.") from exc
     pythoncom.CoInitialize()
     try:
         namespace = _outlook_namespace()
@@ -185,7 +219,7 @@ def outlook(cfg, start=None, end=None, known_ids=None, progress=None, metadata_u
             message = {"id": identifier, "thread_id": str(item.ConversationID or identifier),
                        "subject": str(item.Subject or "(제목 없음)"), "sender": sender,
                        "to": ",".join(to), "cc": ",".join(cc), "sent_at": timestamp.isoformat(), "received_at": received.astimezone(KST).isoformat(),
-                       "body": str(item.Body), "source": "outlook-classic"}
+                       "body": _outlook_body(item), "source": "outlook-classic"}
             yield normalize_message(message, cfg)
     finally:
         # COM 참조는 생성한 스레드에서만 사용하고 해제합니다.

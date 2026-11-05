@@ -12,25 +12,22 @@
 
 **2026-11-04 업데이트:** 현재 PC의 AD 계정명 + `@golfzon.com`으로 Classic Outlook에 연결합니다. 실제 계정 `maya0720@golfzon.com` 연결과 최근 30일 메일 409건 수집을 확인했습니다. 기존 실습 데이터는 유지하고 실제 메일은 `data/golfzon/`에 분리했습니다.
 
-앱을 실행하면 최근 30일을 자동 수집하고 실행 중 10분마다 다시 확인합니다. 이전 메일은 화면의 **기간 지정**에서 시작일·종료일을 지정하세요. Outlook의 수신 시각 필터를 먼저 적용하고 기존 메일 ID의 본문은 재조회하지 않습니다. 자동 수집은 앱이 켜져 있을 때 동작합니다.
+앱을 실행하면 최근 30일을 자동 수집하고 Outlook 새 메일 알림을 받아 들어오는 메일을 바로 수집합니다. 알림 누락에 대비해 실행 중 10분마다 다시 확인합니다. 이전 메일은 화면의 **기간 지정**에서 시작일·종료일을 지정하세요. Outlook의 수신 시각 필터를 먼저 적용하고 기존 메일 ID의 본문은 재조회하지 않습니다. 자동 수집은 앱이 켜져 있을 때 동작합니다.
 
 ## 빠른 시작
 
 Python 3.11 이상을 설치한 Windows에서 PowerShell을 엽니다.
 
 ```powershell
-cd D:\99.GPT\02.Mail
-py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-Copy-Item config.example.json config.json
-.\.venv\Scripts\python.exe app.py serve
+cd D:\00AI_Workspace\Codex\Mail
+.\run.bat
 ```
 
-브라우저에서 <http://127.0.0.1:18765>를 여세요. `run.bat`으로도 시작할 수 있습니다. 현재 PC에는 가상환경과 Outlook 의존 패키지를 준비했습니다. 기존 설정이 있으면 복사 명령을 생략하세요.
+`run.bat`이 Python 3.11과 Outlook·PDF 필수 패키지를 확인·설치하고, 설정 파일이 없으면 예제 설정을 만든 뒤 앱을 시작합니다. Python이 없으면 winget 설치를 시도합니다. 사내 승인된 PyPI 미러 또는 PyPI 접속이 필요합니다. 설치만 먼저 하려면 `setup.bat`을 실행하세요. Classic Outlook은 같은 Windows 로그인 세션에서 먼저 열고 로그인해 두세요.
 
-실제 메일과 분리한 실습은 `.\.venv\Scripts\python.exe app.py --config config.demo.json serve`로 실행하고 <http://127.0.0.1:18766>을 여세요. **사용 방법·가져오기 → 가상 메일 추가**에서 시작합니다.
+실제 메일과 분리한 실습은 `.\.venv311\Scripts\python.exe app.py --config config.demo.json serve`로 실행하고 <http://127.0.0.1:18766>을 여세요. **사용 방법·가져오기 → 가상 메일 추가**에서 시작합니다.
 
-현재 작업 PC에는 `.venv`를 생성해 두었습니다. 이 PC에서는 `run.bat` 또는 `.\.venv\Scripts\python.exe app.py serve`로 바로 실행할 수 있습니다. 다른 PC로 옮기면 가상환경을 새로 만드세요.
+PC마다 `setup.bat`을 실행하세요. `.venv311`은 Git에 포함되지 않는 로컬 Python 환경입니다.
 
 `config.json`이 없으면 예제 설정을 읽습니다. 기본 설정의 `identity_mode=windows_ad`는 Windows 계정명을 사용합니다. 수동 주소를 사용하려면 `identity_mode=manual`, `user_email=실제주소`로 함께 변경하고 별도 데이터 폴더를 지정하세요.
 
@@ -72,7 +69,7 @@ Classic Outlook은 COM 로컬 객체로 읽습니다. New Outlook은 이 방식�
 ## 테스트
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv311\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
 기본 앱은 단일 사용자 로컬 실행용입니다. 사내 다중 사용자 서비스로 공개하려면 별도의 인증·접근제어·배포 설계가 필요합니다.

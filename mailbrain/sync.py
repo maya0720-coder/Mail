@@ -14,10 +14,13 @@ class SyncManager:
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
         self.jobs = queue.Queue(maxsize=1)
+        self.new_mail_event = threading.Event()
         self.thread = None
         self.state = {"phase": "대기", "connected": False, "busy": False, "error": None,
                       "email": cfg["user_email"], "scanned": 0, "matched": 0,
                       "imported": 0, "failed": 0, "last_finished": None, "next_sync": None,
+                      "event_watch": "starting" if cfg.get("outlook_auto_sync", False) else "disabled",
+                      "watch_error": None,
                       "auto_enabled": bool(cfg.get("outlook_auto_sync", False)),
                       "interval_minutes": max(1, int(cfg.get("outlook_sync_minutes", 10))),
                       "range_start": None, "range_end": None}
@@ -58,27 +61,53 @@ class SyncManager:
     def worker(self):
         next_due = None
         interval = self.state["interval_minutes"] * 60
-        while not self.stop_event.is_set():
+        pythoncom = application = event_sink = None
+        com_initialized = False
+        if self.state["auto_enabled"]:
             try:
-                job = self.jobs.get(timeout=0.5)
-            except queue.Empty:
+                import pythoncom as com
+                com.CoInitialize()
+                pythoncom, com_initialized = com, True
+                from .collectors import watch_outlook_new_mail
+                application, event_sink = watch_outlook_new_mail(self.new_mail_event.set)
+                self.update(event_watch="connected", watch_error=None)
+            except Exception as exc:
+                self.update(event_watch="unavailable", watch_error=str(exc))
+        try:
+            while not self.stop_event.is_set():
+                if pythoncom is not None:
+                    pythoncom.PumpWaitingMessages()
+                if self.state["auto_enabled"] and self.new_mail_event.is_set() and not self.state["busy"]:
+                    self.new_mail_event.clear()
+                    try:
+                        self.submit()
+                    except ValueError:
+                        self.new_mail_event.set()
                 if self.state["auto_enabled"] and next_due is not None and time.monotonic() >= next_due:
                     try:
                         self.submit()
                         next_due = None
                     except ValueError:
                         pass
-                continue
-            try:
-                self.execute(*job)
-            except Exception as exc:
-                self.update(phase="연결/수집 실패", error=str(exc), last_finished=now())
-            finally:
-                self.update(busy=False)
-                self.jobs.task_done()
-                if self.state["auto_enabled"]:
-                    next_due = time.monotonic() + interval
-                    self.update(next_sync=(datetime.now(KST) + timedelta(seconds=interval)).isoformat(timespec="seconds"))
+                try:
+                    job = self.jobs.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                try:
+                    self.execute(*job)
+                except Exception as exc:
+                    self.update(phase="연결/수집 실패", error=str(exc), last_finished=now())
+                finally:
+                    self.update(busy=False)
+                    self.jobs.task_done()
+                    if self.state["auto_enabled"]:
+                        next_due = time.monotonic() + interval
+                        self.update(next_sync=(datetime.now(KST) + timedelta(seconds=interval)).isoformat(timespec="seconds"))
+        finally:
+            event_sink = None
+            application = None
+            if com_initialized:
+                pythoncom.CoUninitialize()
 
     def execute(self, start, end, probe):
         import uuid
@@ -99,7 +128,9 @@ class SyncManager:
                 lower, upper = collection_window(start, end)
                 self.update(phase="메일 수집 중", scanned=0, matched=0, imported=0, failed=0,
                             range_start=lower.isoformat(), range_end=upper.isoformat())
-                known = {row["id"] for row in self.store.rows("SELECT id FROM messages")}
+                # Revisit rows whose original collection produced no body so the
+                # collector can recover content from Outlook's HTMLBody.
+                known = {row["id"] for row in self.store.rows("SELECT id FROM messages WHERE length(trim(body)) > 0")}
                 counts = {"imported": 0, "failed": 0}
 
                 def progress(**values):

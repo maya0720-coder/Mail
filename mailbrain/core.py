@@ -427,14 +427,18 @@ class Pipeline:
                         continue
                     message = normalize_message(raw, self.cfg)
                     existing = self.store.rows("SELECT body,received_at FROM messages WHERE id=?", (message["id"],))
+                    recovering_body = False
                     if existing:
                         if existing[0]["body"] != message["body"]:
-                            raise ValueError("동일 메일 ID의 원문이 달라 수집을 중단했습니다.")
+                            if existing[0]["body"].strip() or not message["body"].strip():
+                                raise ValueError("A non-empty saved message body cannot be overwritten by a different body.")
+                            recovering_body = True
                         if message.get("received_at") and not existing[0]["received_at"]:
                             with self.store.connect() as db:
                                 db.execute("UPDATE messages SET received_at=? WHERE id=?", (message["received_at"], message["id"]))
-                        counts["duplicates"] += 1
-                        continue
+                        if not recovering_body:
+                            counts["duplicates"] += 1
+                            continue
                     analysis = engine.role("01_analyze", {"user_email": self.cfg["user_email"], "message": message})
                     if analysis is None:
                         analysis = rule_analysis(message, self.cfg)
@@ -447,10 +451,16 @@ class Pipeline:
                     links = engine.role("02_reconcile", {"analysis": analysis, "existing_tasks": related})
                     link_list = links.get("links", []) if isinstance(links, dict) else []
                     with self.store.connect() as db:
-                        db.execute("INSERT INTO messages(id,thread_id,subject,sender,recipients,sent_at,body,summary,source,imported_at,analysis,received_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (
-                            message["id"], message["thread_id"], message["subject"], message["sender"],
-                            dump({"to": message["to"], "cc": message.get("cc", "")}), message["sent_at"],
-                            message["body"], analysis["summary"], message.get("source", "import"), now(), dump(analysis), message.get("received_at")))
+                        if recovering_body:
+                            db.execute("UPDATE messages SET thread_id=?,subject=?,sender=?,recipients=?,sent_at=?,body=?,summary=?,source=?,analysis=?,received_at=COALESCE(received_at,?) WHERE id=?", (
+                                message["thread_id"], message["subject"], message["sender"],
+                                dump({"to": message["to"], "cc": message.get("cc", "")}), message["sent_at"],
+                                message["body"], analysis["summary"], message.get("source", "import"), dump(analysis), message.get("received_at"), message["id"]))
+                        else:
+                            db.execute("INSERT INTO messages(id,thread_id,subject,sender,recipients,sent_at,body,summary,source,imported_at,analysis,received_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (
+                                message["id"], message["thread_id"], message["subject"], message["sender"],
+                                dump({"to": message["to"], "cc": message.get("cc", "")}), message["sent_at"],
+                                message["body"], analysis["summary"], message.get("source", "import"), now(), dump(analysis), message.get("received_at")))
                         for index, item in enumerate(analysis["tasks"]):
                             matches = [t for t in related if t["title"] == item["title"]]
                             target = matches[0]["id"] if len(matches) == 1 else None

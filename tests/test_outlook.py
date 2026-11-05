@@ -5,7 +5,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
-from mailbrain.collectors import collection_window, outlook_filter, outlook, _outlook_account
+from mailbrain.collectors import collection_window, outlook_filter, outlook, outlook_probe, _outlook_account, _outlook_body, watch_outlook_new_mail
 from mailbrain.core import KST, Pipeline, Store, load_config, ROOT
 from mailbrain.sync import SyncManager
 from mailbrain.demo import messages
@@ -78,6 +78,40 @@ class OutlookTests(unittest.TestCase):
         self.assertIn("2026-08-31 15:00:00", query)
         self.assertIn("2026-09-30 15:00:00", query)
         self.assertIn("urn:schemas:httpmail:datereceived", query)
+
+    def test_outlook_html_body_is_used_when_plain_body_is_empty(self):
+        item = types.SimpleNamespace(Body="", HTMLBody="<html><style>hidden</style><p>메일 내용</p><br>확인</html>")
+        self.assertEqual(_outlook_body(item), "메일 내용\n확인")
+
+    def test_new_mail_event_notifies_sync_callback(self):
+        client = types.SimpleNamespace(Dispatch=MagicMock(return_value=object()))
+        client.WithEvents = lambda app, event_class: event_class()
+        win32com = types.ModuleType("win32com")
+        win32com.client = client
+        called = threading.Event()
+        with patch.dict("sys.modules", {"win32com": win32com, "win32com.client": client}):
+            app, sink = watch_outlook_new_mail(called.set)
+            sink.OnNewMailEx("new-entry-id")
+        self.assertTrue(called.is_set())
+        client.Dispatch.assert_called_once_with("Outlook.Application")
+
+    def test_missing_pywin32_errors_explain_install_requirement(self):
+        with patch.dict("sys.modules", {"pythoncom": None, "win32com": None, "win32com.client": None}):
+            with self.assertRaisesRegex(ValueError, "requirements.txt"):
+                outlook_probe(self.cfg)
+            with self.assertRaisesRegex(ValueError, "requirements.txt"):
+                watch_outlook_new_mail(lambda: None)
+
+    def test_outlook_com_failure_includes_hresult(self):
+        error = RuntimeError("COM activation failed")
+        error.hresult = 0x80070520
+        client = types.SimpleNamespace(Dispatch=MagicMock(side_effect=error))
+        win32com = types.ModuleType("win32com")
+        win32com.client = client
+        with patch.dict("sys.modules", {"win32com": win32com, "win32com.client": client}):
+            with self.assertRaisesRegex(ValueError, "HRESULT 0x80070520"):
+                from mailbrain.collectors import _outlook_namespace
+                _outlook_namespace()
 
     def test_only_matching_account_delivery_store(self):
         other = types.SimpleNamespace(SmtpAddress="other@example.com", DeliveryStore=MagicMock())
@@ -156,6 +190,42 @@ class OutlookTests(unittest.TestCase):
                 manager.start()
                 try:
                     self.assertTrue(called.wait(3))
+                finally:
+                    manager.close()
+
+    def test_new_mail_event_queues_followup_sync(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = Store(folder)
+            cfg = {**self.cfg, "outlook_auto_sync": True}
+            manager = SyncManager(cfg, store, Pipeline(cfg, store))
+            registered = threading.Event()
+            callback = {}
+            calls = []
+            first_call = threading.Event()
+            enough_calls = threading.Event()
+
+            def watch(on_new_mail):
+                callback["notify"] = on_new_mail
+                registered.set()
+                app = object()
+                return app, object()
+
+            com = types.SimpleNamespace(CoInitialize=MagicMock(), CoUninitialize=MagicMock(), PumpWaitingMessages=MagicMock())
+            def execute(*args):
+                calls.append(args)
+                first_call.set()
+                if len(calls) >= 2:
+                    enough_calls.set()
+
+            with patch.dict("sys.modules", {"pythoncom": com}), patch("mailbrain.collectors.watch_outlook_new_mail", side_effect=watch), patch.object(manager, "execute", side_effect=execute):
+                manager.start()
+                try:
+                    self.assertTrue(registered.wait(2))
+                    self.assertTrue(first_call.wait(2))
+                    callback["notify"]()
+                    self.assertTrue(enough_calls.wait(2))
+                    self.assertEqual(len(calls), 2)
+                    self.assertEqual(manager.snapshot()["event_watch"], "connected")
                 finally:
                     manager.close()
 

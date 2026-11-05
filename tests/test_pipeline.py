@@ -117,6 +117,14 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result["failed"], 1)
         self.assertEqual(self.store.rows("SELECT body FROM messages")[0]["body"], self.mails[0]["body"])
 
+    def test_empty_saved_body_is_recovered_on_reimport(self):
+        original = {**self.mails[0], "body": ""}
+        self.pipeline.ingest([original])
+        recovered = {**self.mails[0], "body": "복구된 메일 본문"}
+        result = self.pipeline.ingest([recovered])
+        self.assertEqual(result["imported"], 1)
+        self.assertEqual(self.store.rows("SELECT body FROM messages WHERE id=?", (recovered["id"],))[0]["body"], recovered["body"])
+
     def test_search_expands_thread_and_events(self):
         self.accept_one()
         self.pipeline.ingest([self.mails[1]])
