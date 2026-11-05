@@ -1,0 +1,4 @@
+# Windows Classic Outlook 실메일 자동 수집.
+pywin32>=308,<400; sys_platform == 'win32'
+reportlab>=4,<5
+# 그룹웨어 Chromium 수집은 requirements-collectors.txt를 사용하세요.

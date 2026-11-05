@@ -1,0 +1,10 @@
+{
+  "user_email": "me@example.com",
+  "aliases": [],
+  "data_dir": "data/demo",
+  "engine": "rules",
+  "ollama_model": "",
+  "port": 18766,
+  "outlook_auto_sync": false,
+  "outlook_sync_minutes": 10
+}

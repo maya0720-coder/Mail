@@ -1,0 +1,30 @@
+{
+  "user_email": "auto",
+  "identity_mode": "windows_ad",
+  "email_domain": "golfzon.com",
+  "aliases": [],
+  "excluded_senders": ["no-reply@teams.mail.microsoft"],
+  "data_dir": "data/golfzon",
+  "engine": "rules",
+  "ollama_model": "",
+  "port": 18765,
+  "collection_limit": 50,
+  "outlook_auto_sync": true,
+  "outlook_sync_minutes": 10,
+  "groupware": {
+    "url": "https://mail.example.com/inbox",
+    "allowed_origin": "https://mail.example.com",
+    "account_selector": "[data-current-user-email]",
+    "account_attribute": "data-current-user-email",
+    "row_selector": "[data-message-id]",
+    "id_attribute": "data-message-id",
+    "subject_selector": ".subject",
+    "sender_selector": ".sender",
+    "to_selector": ".to",
+    "cc_selector": ".cc",
+    "date_selector": "time",
+    "date_attribute": "datetime",
+    "body_selector": ".mail-body",
+    "thread_attribute": "data-thread-id"
+  }
+}
