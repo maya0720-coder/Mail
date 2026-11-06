@@ -23,6 +23,11 @@ class TopicsHistoryTests(unittest.TestCase):
     def test_repeated_external_reply_prefix(self):
         self.assertEqual(clean_subject("[외부메일]Re: [외부메일]FW: QA 서버 시스템 카피 문의"), "QA 서버 시스템 카피 문의")
 
+    def test_lease_schedule_is_categorized_as_finance_work(self):
+        from mailbrain.topics import category, task_title
+        self.assertEqual(category("재무팀 리스 스케쥴 변경 요청"), "재무/리스 업무")
+        self.assertEqual(task_title("[재무팀] 리스 스케쥴 변경 요청의 건", "계약 변경으로 인한 스케쥴 조정"), "리스 스케줄 조정")
+
     def test_same_thread_one_topic_many_candidates(self):
         self.pipeline.ingest(self.mails[:2])
         groups = Topics(self.store).build()
@@ -71,7 +76,7 @@ class TopicsHistoryTests(unittest.TestCase):
         self.assertGreater(result["evidence_count"],0)
         self.assertIn("RAG",result["mode"])
         self.assertIn("스레드",self.pipeline.search("협력사")["mode"])
-        self.assertEqual(self.store.state()["tasks"],[])
+        self.assertEqual(len(self.store.state()["tasks"]), 1)
 
     def test_rag_synonym_copy_retrieves_korean(self):
         self.pipeline.ingest([{**self.mails[0],"subject":"QA 서버 시스템 카피 문의","body":"카피 일정을 다음 주로 변경합니다."}])
@@ -93,6 +98,22 @@ class TopicsHistoryTests(unittest.TestCase):
         self.store.edit_task(task["id"],{"status":"완료"})
         result=self.pipeline.history("검토 자료")
         self.assertTrue(any(item["kind"]=="업무 변경" for day in result["days"] for item in day["items"]))
+
+    def test_legacy_partial_auto_refresh_events_do_not_break_history_or_reports(self):
+        self.pipeline.ingest(self.mails[:1])
+        message = self.store.rows("SELECT * FROM messages")[0]
+        with self.store.connect() as db:
+            self.store.create_auto_task(db, message, "메일에서 확인한 업무")
+            task = dict(db.execute("SELECT * FROM tasks").fetchone())
+            partial = {key: task[key] for key in ("title", "source_id", "summary", "needs_reply", "read_at")}
+            db.execute("INSERT INTO events(task_id,kind,before_json,after_json,source_id,actor,at) VALUES(?,?,?,?,?,?,?)",
+                       (task["id"], "메일 스레드 정보 갱신", json.dumps({"title": task["title"]}),
+                        json.dumps(partial), message["id"], "자동 분류", task["updated_at"]))
+        history = self.pipeline.history("")
+        self.assertGreater(history["evidence_count"], 0)
+        today = datetime.now(KST).date().isoformat()
+        report = self.pipeline.report(today, today)
+        self.assertEqual(report["document"]["end"], today)
 
     def test_topic_filter_and_no_result(self):
         self.pipeline.ingest(self.mails)

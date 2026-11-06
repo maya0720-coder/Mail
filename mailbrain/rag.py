@@ -51,7 +51,7 @@ class HistoryRAG:
         mapping = {m["id"]: g for g in groups for m in g["messages"]}
         messages = self.store.rows("SELECT * FROM messages WHERE excluded=0")
         events = self.store.rows("SELECT * FROM events ORDER BY seq")
-        stamp = hashlib.sha256(("rag-v3:" + dump([(m["id"], m["received_at"], m["summary"]) for m in messages] + [(e["seq"], e["at"]) for e in events])).encode()).hexdigest()
+        stamp = hashlib.sha256(("rag-v4:" + dump([(m["id"], m["received_at"], m["summary"]) for m in messages] + [(e["seq"], e["at"]) for e in events])).encode()).hexdigest()
         with self.store.connect() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS rag_chunks(id INTEGER PRIMARY KEY, message_id TEXT, event_seq INTEGER, topic_id TEXT, day TEXT, title TEXT, content TEXT, source_time TEXT);
@@ -74,9 +74,16 @@ class HistoryRAG:
                 after = json.loads(event["after_json"])
                 before = json.loads(event["before_json"]) or {}
                 source = event["source_id"] or after.get("source_id")
+                # Do not surface event text whose backing message was hidden
+                # by mail policy (for example Teams notifications).
+                if source and source not in mapping:
+                    continue
                 topic = mapping.get(source, {}).get("id", "")
-                content = f"{event['kind']}: {after['title']} / 상태 {canonical_status(before.get('status','없음'))} → {canonical_status(after['status'])} / 기한 {before.get('due_date') or '미정'} → {after.get('due_date') or '미정'} / 확인 주체 {event['actor']}"
-                insert(source, event["seq"], topic, event["at"][:10], after["title"], content, event["at"])
+                title = after.get("title") or before.get("title") or event["task_id"] or "업무 변경"
+                before_status = canonical_status(before.get("status", "정보 없음"))
+                after_status = canonical_status(after.get("status", before_status))
+                content = f"{event['kind']}: {title} / 상태 {before_status} → {after_status} / 기한 {before.get('due_date') or '미정'} → {after.get('due_date') or before.get('due_date') or '미정'} / 확인 주체 {event['actor']}"
+                insert(source, event["seq"], topic, event["at"][:10], title, content, event["at"])
             db.execute("INSERT INTO metadata(key,value) VALUES('rag_stamp',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (stamp,))
         return groups
 

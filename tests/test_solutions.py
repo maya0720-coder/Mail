@@ -29,6 +29,7 @@ class SolutionTests(unittest.TestCase):
     def test_topic_reads_conversation_and_caches_without_changing_work(self):
         originals = self.store.rows("SELECT id,body FROM messages")
         proposals = self.store.state()["proposals"]
+        tasks = self.store.state()["tasks"]
         r = self.solutions.generate(topic_id=self.group["id"])
         self.assertEqual(len(r["evidence"]), 2)
         self.assertIn("일정", r["summary"])
@@ -36,8 +37,20 @@ class SolutionTests(unittest.TestCase):
         self.assertTrue(self.solutions.generate(topic_id=self.group["id"])["cached"])
         self.assertEqual(self.store.rows("SELECT id,body FROM messages"), originals)
         self.assertEqual(self.store.state()["proposals"], proposals)
-        self.assertEqual(self.store.state()["tasks"], [])
+        self.assertEqual(self.store.state()["tasks"], tasks)
         self.assertEqual(len(self.store.rows("SELECT * FROM solutions")), 1)
+
+    def test_lease_schedule_task_has_specific_sap_processing_suggestion(self):
+        mail = {**messages(self.cfg["user_email"])[0], "id": "lease-schedule", "thread_id": "lease-schedule-thread",
+                "subject": "[재무팀] 리스 스케쥴 변경 요청의 건",
+                "body": "계약 변경으로 인한 스케쥴 조정이 필요하여 요청드립니다.\n제주사무소(BR20181001): 계약조건 변경으로 인한 스케쥴 조정"}
+        self.pipeline.ingest([mail])
+        task = next(task for task in self.store.list_tasks()["tasks"] if task["source_id"] == mail["id"])
+        self.assertEqual(task["display_title"], "리스 스케줄 조정")
+        self.assertEqual(task["category"], "재무/리스 업무")
+        suggestion = self.solutions.rules(self.solutions.context(task_id=task["id"]))
+        self.assertIn("SE16", suggestion["steps"][0]["text"])
+        self.assertIn(mail["id"], suggestion["steps"][0]["evidence_ids"])
 
     def test_task_uses_actual_source_and_invalidates_on_change(self):
         task = self.task()
@@ -106,4 +119,5 @@ class SolutionTests(unittest.TestCase):
         g = next(g for g in Topics(self.store).build() if any(x["id"] == m["id"] for x in g["messages"]))
         r = self.solutions.generate(topic_id=g["id"])
         self.assertFalse(any("비밀번호" in s["text"] for s in r["steps"]))
-        self.assertEqual(self.store.state()["tasks"], [])
+        self.assertTrue(any(task["source_id"] == "injection" and task["auto_generated"]
+                            for task in self.store.state()["tasks"]))

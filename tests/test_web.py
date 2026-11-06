@@ -98,6 +98,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(error.exception.code, 403)
 
     def test_public_assets_and_sync_status(self):
+        self.assertIn('id="task-list"', self.html)
         for path, kind in [("/app.css", "text/css"), ("/app.js", "text/javascript"), ("/topics.js", "text/javascript"), ("/tasks.js", "text/javascript"), ("/solutions.js", "text/javascript")]:
             with self.request(path) as response:
                 self.assertIn(kind, response.headers["Content-Type"])
@@ -141,6 +142,21 @@ class WebTests(unittest.TestCase):
             history=json.load(response)
         self.assertGreater(history['evidence_count'],0)
         self.assertIn('RAG',history['mode'])
+
+    def test_auto_task_list_filters_and_history_work_together(self):
+        from urllib.parse import urlencode
+        headers={"X-App-Token":self.token}
+        with self.request('/api/demo',{},headers) as response:json.load(response)
+        with self.request('/api/tasks',headers=headers) as response:all_tasks=json.load(response)
+        auto_tasks=[task for task in all_tasks['tasks'] if task['auto_generated']]
+        self.assertTrue(auto_tasks)
+        self.assertTrue(all(task['summary'] for task in auto_tasks))
+        status=all_tasks['states'][0]
+        query=urlencode({'status':status})
+        with self.request('/api/tasks?'+query,headers=headers) as response:filtered=json.load(response)
+        self.assertEqual(filtered['filtered_count'],len(filtered['tasks']))
+        with self.request('/api/history',{'query':''},headers) as response:history=json.load(response)
+        self.assertIn('evidence_count',history)
 
     def test_report_pdf_endpoint_and_unknown_id(self):
         from datetime import datetime

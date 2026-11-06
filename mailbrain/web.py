@@ -125,6 +125,17 @@ def serve(cfg, store, pipeline, on_ready=None, health=None):
                     store.edit_task(data["id"], data["changes"])
                     pipeline.wiki()
                     result = {"ok": True}
+                elif self.path == "/api/task/read":
+                    store.mark_task_read(data["id"])
+                    result = {"ok": True}
+                elif self.path == "/api/reply-draft":
+                    rows = store.rows("SELECT t.title,t.summary,t.needs_reply,m.subject FROM tasks t JOIN messages m ON m.id=t.source_id WHERE t.id=? AND t.deleted_at IS NULL", (data.get("task_id"),))
+                    if not rows:
+                        raise ValueError("메일과 연결된 업무를 찾지 못했습니다.")
+                    item = rows[0]
+                    if not item["needs_reply"]:
+                        raise ValueError("메일 본문에서 회신 요청을 찾지 못했습니다.")
+                    result = {"subject": item["subject"], "draft": f"안녕하세요.\n\n{item['subject']} 관련 내용 확인했습니다.\n\n[요청에 대한 답변 또는 조치 결과를 입력해 주세요.]\n\n감사합니다."}
                 elif self.path == "/api/solution":
                     result = solutions.generate(data.get("topic_id"), data.get("task_id"), data.get("regenerate", False))
                 elif self.path == "/api/task/delete":

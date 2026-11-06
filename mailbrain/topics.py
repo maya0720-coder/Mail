@@ -27,14 +27,21 @@ def brief(body, limit=260):
 
 
 CATEGORIES = ["SAP ERP 개선 과제", "SAP ERP 이슈 및 조치", "SAP ERP 운영 유지보수 관리", "AI 데이터 업무 지원", "IFRS18 업무 지원", "펌뱅킹", "상시업무"]
+CATEGORIES.append("재무/리스 업무")
+CATEGORIES.append("전자결재")
 
 
 def category(text):
     value = text.lower()
+    from .policy import approval_kind
+    if approval_kind(text):
+        return "전자결재"
     if "ifrs" in value:
         return CATEGORIES[4]
     if any(word in value for word in ("펌뱅킹", "fcm", "은행", "송금")):
         return CATEGORIES[5]
+    if "리스" in value and any(word in value for word in ("스케줄", "스케쥴", "계약", "임대")):
+        return CATEGORIES[7]
     if re.search(r"\bai\b|데이터 솔루션|인공지능", value):
         return CATEGORIES[3]
     if any(word in value for word in ("유지보수", "노츠", "보안 패치", "rfc 계정", "취약")):
@@ -44,6 +51,18 @@ def category(text):
     if any(word in value for word in ("sap", "erp", "서버", "카피", "전표")):
         return CATEGORIES[1]
     return CATEGORIES[6]
+
+
+def task_title(subject, group_text=""):
+    """메일 제목을 업무 목록에서 빠르게 알아볼 짧은 이름으로 정리합니다."""
+    title = re.sub(r"^\s*\[[^\]]+\]\s*", "", clean_subject(subject))
+    title = re.sub(r"\s*(?:요청(?:의\s*건|\s*건)?|문의(?:의\s*건|\s*건)?|협조(?:의\s*건|\s*요청)?|의\s*건)\s*$", "", title, flags=re.I).strip(" -:：")
+    text = f"{subject} {group_text}".lower()
+    if "리스" in text and any(word in text for word in ("스케줄", "스케쥴")):
+        return "리스 스케줄 조정"
+    if len(title) > 72:
+        return title[:69].rstrip() + "…"
+    return title or clean_subject(subject)
 
 
 class Topics:
@@ -91,7 +110,11 @@ class Topics:
                                  "sent_at": mail["sent_at"], "received_at": mail["received_at"] or mail["sent_at"],
                                  "date_basis": "수신일" if mail["received_at"] else "발송일 대체",
                                  "summary": brief(mail["body"]), "proposals": by_mail.get(mail["id"], [])})
-            result.append({"id": identity, "title": title, "category": category(title), "date_basis": children[0]["date_basis"],
+            group_text = " ".join(m["subject"] + " " + brief(m["body"]) for m in group)
+            is_approval = category(group_text) == "전자결재"
+            lowered = group_text.lower()
+            approval_status = ("결재 완료" if any(word in lowered for word in ("결재 완료", "결재완료", "승인 완료", "승인완료", "결재가 완료", "최종 승인", "approved", "approval completed")) else "진행 알림") if is_approval else None
+            result.append({"id": identity, "title": title, "category": category(group_text), "approval_status": approval_status, "date_basis": children[0]["date_basis"],
                            "latest_at": children[0]["received_at"], "latest_summary": children[0]["summary"],
                            "message_count": len(group), "proposal_count": sum(len(m["proposals"]) for m in children),
                            "messages": children})

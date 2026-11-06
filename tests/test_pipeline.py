@@ -35,15 +35,20 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(self.store.state()["messages"]), 5)
         self.assertEqual(len(self.store.state()["proposals"]), 3)
 
-    def test_no_task_before_approval(self):
+    def test_direct_recipient_gets_auto_task_before_proposal_approval(self):
         self.ingest_one()
-        self.assertEqual(self.store.state()["tasks"], [])
+        self.assertEqual(len(self.store.state()["tasks"]), 1)
+        self.assertEqual(self.store.state()["tasks"][0]["auto_generated"], 1)
         self.assertEqual(len(self.store.state()["proposals"]), 1)
 
     def test_approval_records_event_atomically(self):
-        task = self.accept_one()
+        self.ingest_one()
+        prior_events = len(self.store.state()["events"])
+        proposal = self.store.state()["proposals"][0]
+        self.store.resolve(proposal["id"], True)
+        task = self.store.state()["tasks"][0]
         self.assertEqual(task["status"], "등록완료")
-        self.assertEqual(len(self.store.state()["events"]), 1)
+        self.assertEqual(len(self.store.state()["events"]), prior_events + 1)
         proposal = self.store.rows("SELECT * FROM proposals")[0]
         with self.assertRaises(ValueError):
             self.store.resolve(proposal["id"], True)
@@ -52,7 +57,8 @@ class PipelineTests(unittest.TestCase):
     def test_reject_does_not_create_task(self):
         self.ingest_one()
         self.store.resolve(self.store.state()["proposals"][0]["id"], False)
-        self.assertEqual(self.store.state()["tasks"], [])
+        self.assertEqual(len(self.store.state()["tasks"]), 1)
+        self.assertEqual(self.store.state()["tasks"][0]["auto_generated"], 1)
 
     def test_other_recipient_rejected(self):
         mail = {**self.mails[0], "to": "someone@example.com"}
@@ -63,6 +69,18 @@ class PipelineTests(unittest.TestCase):
     def test_cc_not_automatically_assignee(self):
         result = rule_analysis(self.mails[3], self.cfg)
         self.assertEqual(result["tasks"], [])
+
+    def test_actionable_cc_mail_is_added_to_my_work_but_cc_notice_is_not(self):
+        assigned = {**self.mails[0], "id": "cc-action", "thread_id": "cc-action",
+                    "to": "manager@example.com", "cc": self.cfg["user_email"]}
+        self.pipeline.ingest([assigned])
+        task = next(task for task in self.store.state()["tasks"] if task["source_id"] == assigned["id"])
+        self.assertEqual(task["auto_generated"], 1)
+        self.assertIsNone(task["read_at"])
+
+        notice = {**self.mails[3], "id": "cc-notice", "thread_id": "cc-notice"}
+        self.pipeline.ingest([notice])
+        self.assertFalse(any(task["source_id"] == notice["id"] for task in self.store.state()["tasks"]))
 
     def test_unclear_assignee_is_null(self):
         mail = {**self.mails[0], "body": "관련 부서에서 업무: 문서 검토; 검토해주세요."}
@@ -75,15 +93,17 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.store.state()["tasks"][0]["due_date"], "2027-01-01")
         proposal = self.store.state()["proposals"][0]
         self.assertEqual(proposal["target_id"], task["id"])
+        prior_events = len(self.store.state()["events"])
         self.store.resolve(proposal["id"], True)
         self.assertNotEqual(self.store.state()["tasks"][0]["due_date"], "2027-01-01")
-        self.assertEqual(len(self.store.state()["events"]), 3)
+        self.assertEqual(len(self.store.state()["events"]), prior_events + 1)
 
     def test_update_without_target_is_not_created(self):
         self.pipeline.ingest([self.mails[1]])
         with self.assertRaises(ValueError):
             self.store.resolve(self.store.state()["proposals"][0]["id"], True)
-        self.assertEqual(self.store.state()["tasks"], [])
+        self.assertEqual(len(self.store.state()["tasks"]), 1)
+        self.assertEqual(self.store.state()["tasks"][0]["auto_generated"], 1)
 
     def test_cancel_and_complete_proposals(self):
         task = self.accept_one()
@@ -130,7 +150,7 @@ class PipelineTests(unittest.TestCase):
         self.pipeline.ingest([self.mails[1]])
         result = self.pipeline.search("협력사")
         self.assertEqual(len(result["messages"]), 2)
-        self.assertEqual(len(result["events"]), 1)
+        self.assertGreaterEqual(len(result["events"]), 1)
         self.assertIn("스레드", result["mode"])
 
     def test_search_not_found_and_sql_characters(self):
@@ -163,16 +183,18 @@ class PipelineTests(unittest.TestCase):
         today = datetime.now(KST).date()
         prior = (today - timedelta(days=3)).isoformat()
         with self.store.connect() as db:
-            db.execute("UPDATE events SET at=? WHERE kind='생성'", (prior + "T09:00:00+09:00",))
+            db.execute("UPDATE events SET at=? WHERE task_id=? AND seq=(SELECT MIN(seq) FROM events WHERE task_id=?)",
+                       (prior + "T09:00:00+09:00", task["id"], task["id"]))
         report = self.pipeline.report(prior, prior)
         self.assertEqual(report["active_count"], 1)
         self.assertEqual(report["completed_count"], 0)
 
     def test_invalid_state_rolls_back(self):
         task = self.accept_one()
+        prior_events = len(self.store.state()["events"])
         with self.assertRaises(ValueError):
             self.store.edit_task(task["id"], {"status": "거짓상태"})
-        self.assertEqual(len(self.store.state()["events"]), 1)
+        self.assertEqual(len(self.store.state()["events"]), prior_events)
 
     def test_naive_mail_date_rejected(self):
         with self.assertRaises(ValueError):

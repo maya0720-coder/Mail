@@ -23,7 +23,19 @@ def canonical_status(value):
 
 
 def canonical_task(task):
-    return {**task, "status": canonical_status(task["status"])}
+    # Older automatic-task refresh events stored partial snapshots. Normalize
+    # them before reports replay events so existing databases remain readable.
+    normalized = {
+        "id": None, "title": "(업무 제목 없음)", "project": "기타",
+        "assignee": None, "due_date": None, "status": "등록완료",
+        "created_at": None, "updated_at": None, "source_id": None,
+        "manual": 0, "completed_at": None, "deleted_at": None,
+        "summary": None, "auto_generated": 0, "read_at": None,
+        "needs_reply": 0,
+    }
+    normalized.update(task or {})
+    normalized["status"] = canonical_status(normalized.get("status") or "등록완료")
+    return normalized
 
 
 def now():
@@ -99,7 +111,9 @@ class Store:
                 CREATE TABLE IF NOT EXISTS tasks(
                   id TEXT PRIMARY KEY, title TEXT, project TEXT, assignee TEXT,
                   due_date TEXT, status TEXT, created_at TEXT, updated_at TEXT,
-                  source_id TEXT REFERENCES messages(id), manual INTEGER DEFAULT 0);
+                  source_id TEXT REFERENCES messages(id), manual INTEGER DEFAULT 0,
+                  summary TEXT, auto_generated INTEGER NOT NULL DEFAULT 0,
+                  read_at TEXT, needs_reply INTEGER NOT NULL DEFAULT 0);
                 CREATE TABLE IF NOT EXISTS events(
                   seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT,
                   kind TEXT, before_json TEXT, after_json TEXT, source_id TEXT,
@@ -124,6 +138,10 @@ class Store:
             for column in ("completed_at", "deleted_at"):
                 if column not in task_columns:
                     db.execute(f"ALTER TABLE tasks ADD COLUMN {column} TEXT")
+            for column, declaration in (("summary", "TEXT"), ("auto_generated", "INTEGER NOT NULL DEFAULT 0"),
+                                        ("read_at", "TEXT"), ("needs_reply", "INTEGER NOT NULL DEFAULT 0")):
+                if column not in task_columns:
+                    db.execute(f"ALTER TABLE tasks ADD COLUMN {column} {declaration}")
             for old, new in STATUS_ALIASES.items():
                 db.execute("UPDATE tasks SET status=? WHERE status=?", (new, old))
             # 기존 완료 건은 실제 완료 전이 이벤트가 있을 때만 시각을 보완합니다.
@@ -132,7 +150,7 @@ class Store:
                 for event in db.execute("SELECT * FROM events WHERE task_id=? ORDER BY seq", (task["id"],)):
                     before = json.loads(event["before_json"]) or {}
                     after = json.loads(event["after_json"])
-                    if after["status"] == "완료" and before.get("status") != "완료":
+                    if after.get("status") == "완료" and before.get("status") != "완료":
                         completed_at = event["at"]
                 if completed_at:
                     db.execute("UPDATE tasks SET completed_at=? WHERE id=?", (completed_at, task["id"]))
@@ -142,10 +160,10 @@ class Store:
         self.apply_message_policy({})
 
     def apply_message_policy(self, cfg):
-        from .policy import sender_excluded
+        from .policy import sender_excluded, noise_mail
         with self.connect() as db:
-            for mail in db.execute("SELECT id,sender,excluded FROM messages").fetchall():
-                if sender_excluded(mail["sender"], cfg) and not mail["excluded"]:
+            for mail in db.execute("SELECT id,sender,subject,body,excluded FROM messages").fetchall():
+                if (sender_excluded(mail["sender"], cfg) or noise_mail(mail["subject"], mail["body"], mail["sender"])) and not mail["excluded"]:
                     db.execute("UPDATE messages SET excluded=1 WHERE id=?", (mail["id"],))
 
     def bind_owner(self, email):
@@ -252,6 +270,27 @@ class Store:
             conditions.append("substr(completed_at,1,10)<=?")
             params.append(end)
         tasks = self.rows("SELECT * FROM tasks WHERE " + " AND ".join(conditions) + " ORDER BY updated_at DESC,id", params)
+        # Attach existing thread topics to task rows so the UI can group work
+        # by conversation and category instead of rendering unrelated flat rows.
+        from .topics import Topics, task_title
+        topic_by_message = {}
+        for topic in Topics(self).build():
+            for message in topic["messages"]:
+                topic_by_message[message["id"]] = topic
+        for task in tasks:
+            topic = topic_by_message.get(task.get("source_id"))
+            if topic:
+                task["topic_id"] = topic["id"]
+                task["topic_title"] = topic["title"]
+                task["category"] = topic["category"]
+                task["topic_message_count"] = topic["message_count"]
+                task["display_title"] = task_title(topic["title"], topic["latest_summary"])
+            else:
+                task["topic_id"] = "task-" + str(task["id"])
+                task["topic_title"] = task.get("title") or "제목 없는 업무"
+                task["category"] = "상시업무"
+                task["topic_message_count"] = 0
+                task["display_title"] = task_title(task["title"] or "제목 없는 업무")
         counts = {s: 0 for s in STATE_ORDER}
         scope_where = "deleted_at IS NULL" if scope == "active" else "deleted_at IS NOT NULL"
         for row in self.rows("SELECT status,count(*) AS n FROM tasks WHERE " + scope_where + " GROUP BY status"):
@@ -281,20 +320,163 @@ class Store:
                     changes["manual"] = 1
                     self.change(db, target, changes, "사용자승인", row["source_id"], "메일반영")
                 elif row["action"] == "CREATE":
-                    self.create_task(db, payload, row["source_id"], confirmed=True)
+                    automatic = db.execute("SELECT t.* FROM tasks t JOIN messages tm ON tm.id=t.source_id JOIN messages sm ON sm.thread_id=tm.thread_id WHERE sm.id=? AND t.auto_generated=1 AND t.deleted_at IS NULL ORDER BY t.created_at,t.id LIMIT 1", (row["source_id"],)).fetchone()
+                    if automatic:
+                        changes = {k: payload[k] for k in ("title", "project", "due_date", "assignee") if payload.get(k) is not None}
+                        changes["status"] = "등록완료"
+                        changes["manual"] = 1
+                        self.change(db, automatic["id"], changes, "사용자승인", row["source_id"], "메일반영")
+                    else:
+                        self.create_task(db, payload, row["source_id"], confirmed=True)
                 else:
                     raise ValueError("변경할 대상 업무를 선택하세요.")
             db.execute("UPDATE proposals SET state=? WHERE id=?", ("승인" if accept else "제외", proposal_id))
 
     def create_task(self, db, item, source, confirmed=False):
         timestamp = now()
+        from .policy import reply_requested
+        message = db.execute("SELECT subject,summary,body FROM messages WHERE id=?", (source,)).fetchone()
         task = dict(id=uuid.uuid4().hex[:12], title=item["title"], project=item.get("project") or "미분류",
                     assignee=item.get("assignee"), due_date=item.get("due_date"),
                     status="등록완료" if confirmed else "미등록", created_at=timestamp, updated_at=timestamp,
-                    source_id=source, manual=int(confirmed), completed_at=None, deleted_at=None)
-        db.execute("INSERT INTO tasks(id,title,project,assignee,due_date,status,created_at,updated_at,source_id,manual,completed_at,deleted_at) VALUES(:id,:title,:project,:assignee,:due_date,:status,:created_at,:updated_at,:source_id,:manual,:completed_at,:deleted_at)", task)
+                    source_id=source, manual=int(confirmed), completed_at=None, deleted_at=None,
+                    summary=message["summary"] if message else None, auto_generated=0,
+                    read_at=timestamp if confirmed else None,
+                    needs_reply=int(reply_requested(message["subject"], message["body"])) if message else 0)
+        db.execute("INSERT INTO tasks(id,title,project,assignee,due_date,status,created_at,updated_at,source_id,manual,completed_at,deleted_at,summary,auto_generated,read_at,needs_reply) VALUES(:id,:title,:project,:assignee,:due_date,:status,:created_at,:updated_at,:source_id,:manual,:completed_at,:deleted_at,:summary,:auto_generated,:read_at,:needs_reply)", task)
         db.execute("INSERT INTO events(task_id,kind,before_json,after_json,source_id,actor,at) VALUES(?,?,?,?,?,?,?)",
                    (task["id"], "생성", "null", dump(task), source, "사용자승인" if confirmed else "분석기", timestamp))
+
+    def create_auto_task(self, db, message, summary):
+        from .policy import reply_requested
+        timestamp = now()
+        task = {"id": uuid.uuid4().hex[:12], "title": message["subject"].strip() or "제목 없는 메일",
+                "project": "메일 요청", "assignee": None, "due_date": None, "status": "등록완료",
+                "created_at": timestamp, "updated_at": timestamp, "source_id": message["id"],
+                "manual": 0, "completed_at": None, "deleted_at": None,
+                "summary": (summary or message["subject"])[:16000], "auto_generated": 1,
+                "read_at": None, "needs_reply": int(reply_requested(message["subject"], message["body"]))}
+        db.execute("INSERT INTO tasks(id,title,project,assignee,due_date,status,created_at,updated_at,source_id,manual,completed_at,deleted_at,summary,auto_generated,read_at,needs_reply) VALUES(:id,:title,:project,:assignee,:due_date,:status,:created_at,:updated_at,:source_id,:manual,:completed_at,:deleted_at,:summary,:auto_generated,:read_at,:needs_reply)", task)
+        db.execute("INSERT INTO events(task_id,kind,before_json,after_json,source_id,actor,at) VALUES(?,?,?,?,?,?,?)",
+                   (task["id"], "메일 자동 등록", "null", dump(task), message["id"], "자동 분류", timestamp))
+
+    def mark_task_read(self, task_id):
+        with self.connect() as db:
+            cursor = db.execute("UPDATE tasks SET read_at=? WHERE id=? AND deleted_at IS NULL AND read_at IS NULL", (now(), task_id))
+            if not cursor.rowcount and not db.execute("SELECT 1 FROM tasks WHERE id=? AND deleted_at IS NULL", (task_id,)).fetchone():
+                raise ValueError("읽음 처리할 업무를 찾지 못했습니다.")
+
+    def refresh_auto_thread(self, db, thread_id, cfg, mark_unread=False):
+        from .policy import task_recipient, reply_requested
+        from .topics import clean_subject
+        messages = [dict(row) for row in db.execute(
+            "SELECT * FROM messages WHERE thread_id=? AND excluded=0 ORDER BY COALESCE(received_at,sent_at),id", (thread_id,))]
+        if not messages:
+            return False
+        direct_messages = []
+        for mail in messages:
+            try:
+                recipients = json.loads(mail.get("recipients") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                recipients = {}
+            if not isinstance(recipients, dict):
+                recipients = {}
+            candidate = {"to": recipients.get("to", ""), "cc": recipients.get("cc", ""),
+                         "subject": mail["subject"], "body": mail["body"]}
+            candidate["analysis"] = mail.get("analysis")
+            if task_recipient(candidate, cfg):
+                direct_messages.append((mail, candidate))
+        current = [dict(row) for row in db.execute(
+            "SELECT t.* FROM tasks t JOIN messages m ON m.id=t.source_id "
+            "WHERE m.thread_id=? AND t.auto_generated=1 AND t.deleted_at IS NULL ORDER BY t.created_at,t.id", (thread_id,))]
+        if not current and not direct_messages:
+            return False
+        if not current:
+            mail, candidate = direct_messages[-1]
+            candidate["id"] = mail["id"]
+            self.create_auto_task(db, candidate, mail["summary"])
+            current = [dict(db.execute("SELECT * FROM tasks WHERE source_id=? AND auto_generated=1", (mail["id"],)).fetchone())]
+
+        editable = [task for task in current if not task["manual"]]
+        primary = editable[0] if editable else current[0]
+        merge = [task for task in editable if task["id"] != primary["id"]]
+        archived_auto = db.execute(
+            "SELECT t.id FROM tasks t JOIN messages m ON m.id=t.source_id "
+            "WHERE m.thread_id=? AND t.auto_generated=1 AND t.manual=0 AND t.deleted_at IS NOT NULL", (thread_id,)).fetchall()
+        for archived in archived_auto:
+            db.execute("UPDATE proposals SET target_id=? WHERE target_id=? AND state='대기'",
+                       (primary["id"], archived["id"]))
+        latest = messages[-1]
+
+        # Keep every distinct action extracted from the thread, with its original evidence.
+        actions = {}
+        for mail in messages:
+            try:
+                analysis = json.loads(mail.get("analysis") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                analysis = {}
+            for item in analysis.get("tasks", []):
+                if not isinstance(item, dict):
+                    continue
+                title, action, quote = item.get("title"), item.get("action"), item.get("evidence_quote")
+                if not all(isinstance(value, str) and value.strip() for value in (title, action, quote)):
+                    continue
+                key = (action, re.sub(r"\s+", " ", title).strip().casefold())
+                actions[key] = {"title": title.strip(), "action": action, "quote": quote.strip(),
+                                "at": mail["received_at"] or mail["sent_at"]}
+
+        mail_lines = []
+        omitted_messages = max(0, len(messages) - 25)
+        for mail in messages[-25:]:
+            brief_text = re.sub(r"\s+", " ", mail.get("summary") or "").strip()
+            mail_lines.append(f"- {(mail['received_at'] or mail['sent_at'])[:10]} · {clean_subject(mail['subject'])}: {brief_text[:320]}")
+        action_lines = []
+        labels = {"CREATE": "신규 요청", "UPDATE": "변경 요청", "CANCEL": "취소 요청", "COMPLETE": "완료 확인"}
+        all_actions = list(actions.values())
+        for item in all_actions[-40:]:
+            action_lines.append(f"- [{labels.get(item['action'], item['action'])}] {item['title'][:180]} — {item['quote'][:260]}")
+        omitted_actions = max(0, len(all_actions) - 40)
+        parts = ["같은 메일 스레드의 업무 정리"]
+        if action_lines:
+            parts.extend(["", "메일에서 추출한 업무 요청", *action_lines])
+            if omitted_actions:
+                parts.append(f"- 중복 제거 후 요청 {omitted_actions}건은 원문에서 확인하세요.")
+        parts.extend(["", "같은 스레드 메일별 요약", *mail_lines])
+        if omitted_messages:
+            parts.append(f"- 이전 메일 {omitted_messages}건은 원문에서 확인하세요.")
+        summary = "\n".join(parts)[:16000]
+        needs_reply = int(any(reply_requested(mail["subject"], mail["body"]) for mail in messages))
+        read_at = None if mark_unread or any(task["read_at"] is None for task in current) else max(task["read_at"] for task in current)
+        new_title = primary["title"] if primary["manual"] else clean_subject(latest["subject"])
+        new_source = primary["source_id"] if primary["manual"] else latest["id"]
+        changes = {"title": new_title, "source_id": new_source, "summary": summary,
+                   "needs_reply": needs_reply, "read_at": read_at}
+        changed = any(primary.get(key) != value for key, value in changes.items())
+        if changed:
+            stamp = now()
+            before = {key: primary.get(key) for key in ("title", "source_id", "summary", "needs_reply", "read_at")}
+            db.execute("UPDATE tasks SET title=?,source_id=?,summary=?,needs_reply=?,read_at=?,updated_at=? WHERE id=?",
+                       (new_title, new_source, summary, needs_reply, read_at, stamp, primary["id"]))
+            db.execute("INSERT INTO events(task_id,kind,before_json,after_json,source_id,actor,at) VALUES(?,?,?,?,?,?,?)",
+                       (primary["id"], "메일 스레드 정보 갱신", dump(before), dump(changes), latest["id"], "자동 분류", stamp))
+        for task in merge:
+            stamp = now()
+            before = dict(task)
+            after = {**task, "deleted_at": stamp, "updated_at": stamp}
+            db.execute("UPDATE proposals SET target_id=? WHERE target_id=? AND state='대기'",
+                       (primary["id"], task["id"]))
+            db.execute("UPDATE tasks SET deleted_at=?,updated_at=? WHERE id=?", (stamp, stamp, task["id"]))
+            db.execute("INSERT INTO events(task_id,kind,before_json,after_json,source_id,actor,at) VALUES(?,?,?,?,?,?,?)",
+                       (task["id"], "같은 스레드 업무 통합", dump(before), dump(after), latest["id"], "자동 분류", stamp))
+        return changed or bool(merge)
+
+    def backfill_auto_tasks(self, cfg):
+        with self.connect() as db:
+            thread_ids = [row["thread_id"] for row in db.execute(
+                "SELECT DISTINCT thread_id FROM messages WHERE excluded=0 ORDER BY thread_id")]
+            for thread_id in thread_ids:
+                self.refresh_auto_thread(db, thread_id, cfg)
+        return len(thread_ids)
 
 
 class Engine:
@@ -411,6 +593,7 @@ class Pipeline:
         self.cfg, self.store = cfg, store
         self.store.bind_owner(cfg["user_email"])
         self.store.apply_message_policy(cfg)
+        self.store.backfill_auto_tasks(cfg)
 
     def ingest(self, messages):
         engine = Engine(self.cfg)
@@ -421,8 +604,8 @@ class Pipeline:
         try:
             for raw in messages:
                 try:
-                    from .policy import sender_excluded
-                    if isinstance(raw, dict) and sender_excluded(raw.get("sender"), self.cfg):
+                    from .policy import sender_excluded, noise_mail, task_recipient
+                    if isinstance(raw, dict) and (sender_excluded(raw.get("sender"), self.cfg) or noise_mail(raw.get("subject"), raw.get("body"), raw.get("sender"))):
                         counts["excluded"] += 1
                         continue
                     message = normalize_message(raw, self.cfg)
@@ -476,6 +659,9 @@ class Pipeline:
                                 reason = "연결할 기존 업무를 선택하세요."
                             db.execute("INSERT INTO proposals(id,source_id,action,target_id,payload,reason) VALUES(?,?,?,?,?,?)",
                                        (uuid.uuid4().hex[:12], message["id"], action, target, dump(item), reason))
+                        self.store.refresh_auto_thread(db, message["thread_id"], self.cfg,
+                                                       mark_unread=task_recipient({**message, "cc": message.get("cc", ""),
+                                                                                  "analysis": analysis}, self.cfg))
                     counts["imported"] += 1
                 except (ValueError, TypeError, KeyError) as exc:
                     counts["failed"] += 1
@@ -549,7 +735,9 @@ class Pipeline:
         snapshot = {}
         changes = []
         for event in events:
-            snapshot[event["task_id"]] = canonical_task(json.loads(event["after_json"]))
+            previous = snapshot.get(event["task_id"], {})
+            after = json.loads(event["after_json"]) or {}
+            snapshot[event["task_id"]] = canonical_task({**previous, **after})
             if event["at"][:10] >= start:
                 changes.append(event)
         snapshot = {key: task for key, task in snapshot.items() if not task.get("deleted_at")}
@@ -558,7 +746,7 @@ class Pipeline:
             if event["task_id"] not in snapshot:
                 continue
             before = json.loads(event["before_json"]) or {}
-            after = json.loads(event["after_json"])
+            after = canonical_task({**snapshot[event["task_id"]], **(json.loads(event["after_json"]) or {})})
             if before.get("status") != "완료" and after["status"] == "완료" and snapshot[event["task_id"]]["status"] == "완료":
                 completed_ids.add(event["task_id"])
         completed = [t for k, t in snapshot.items() if k in completed_ids]

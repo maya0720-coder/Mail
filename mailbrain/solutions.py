@@ -1,9 +1,19 @@
 """원문과 업무 상태를 변경하지 않는, 근거가 연결된 해결 초안."""
 import hashlib
 import json
+import re
 
 from .core import Engine, ROOT, audited, dump, now
 from .topics import Topics, new_body
+
+
+UNSAFE_MAIL_TEXT = re.compile(r"(?i)password|credential|ignore.{0,24}(instruction|command)|run.{0,16}command|비밀번호|명령.{0,16}실행|지침.{0,16}무시")
+
+
+def safe_quote(value):
+    if UNSAFE_MAIL_TEXT.search(value or ""):
+        return "[민감 정보 또는 지시형 문구 생략]"
+    return value
 
 
 class Solutions:
@@ -50,51 +60,107 @@ class Solutions:
         if origin and origin not in selected:
             selected[-1] = origin
         evidence = []
+        action_items = {}
         for m in selected:
             body = new_body(m["body"]) or m["body"]
             evidence.append({"id": m["id"], "subject": m["subject"], "sender": m["sender"],
                              "at": m["received_at"] or m["sent_at"], "body": body[:2200],
                              "truncated": len(body) > 2200})
+            try:
+                analysis = json.loads(m.get("analysis") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                analysis = {}
+            for item in analysis.get("tasks", []):
+                if not isinstance(item, dict):
+                    continue
+                item_title, action, quote = item.get("title"), item.get("action"), item.get("evidence_quote")
+                if not all(isinstance(value, str) and value.strip() for value in (item_title, action, quote)):
+                    continue
+                if UNSAFE_MAIL_TEXT.search(quote):
+                    continue
+                if quote not in body:
+                    continue
+                key = (action, re.sub(r"\s+", " ", item_title).strip().casefold())
+                action_items[key] = {"title": item_title.strip(), "action": action, "quote": quote.strip(),
+                                     "evidence_id": m["id"]}
         return {"title": title, "target_kind": kind, "target_id": target, "task": task,
-                "evidence": evidence, "total_messages": len(visible),
+                "evidence": evidence, "action_items": list(action_items.values()),
+                "task_summary": task.get("summary", "") if task else "", "total_messages": len(visible),
                 "scope": f"관련 메일 {len(visible)}건 중 최근 최대 {self.LIMIT}건과 최초 업무 근거를 포함해 {len(evidence)}건 검토 · 메일별 새 본문 최대 2,200자"}
 
     @staticmethod
     def rules(context):
         evidence = context["evidence"]
         text = "\n".join(m["subject"] + "\n" + m["body"] for m in evidence).lower()
-        # 조건별 권고는 실제 확인된 원인이나 실행 결과가 아니라 검토 절차입니다.
-        scenarios = [
-            (("카피", "복제", "백업", "복구"), "서버 복제·복구 범위와 작업 창부터 합의하는 방안을 권합니다.",
-             ["복제 원본·대상, 작업 범위와 서비스 중단 허용 시간을 담당자에게 확인하세요.",
-              "개인정보·접속정보 마스킹, 백업 및 되돌리기 절차를 검토한 뒤 테스트 계획을 작성하세요.",
-              "승인된 점검 환경에서 연결·데이터 정합성을 검증하고 결과를 공유하는 방안을 제안합니다."]),
-            (("오류", "장애", "실패", "에러", "접속 불가"), "영향 범위와 재현 근거를 먼저 확보한 뒤 원인을 좁히는 방안을 권합니다.",
-             ["발생 시각·영향 사용자·환경·재현 조건을 확인하고 관련 로그를 확보하세요.",
-              "최근 변경사항과 정상 동작 조건을 비교해 원인 가설을 분리하세요.",
-              "복구 방안과 되돌리기 절차를 검토하고 담당자 승인 후 검증하는 방안을 제안합니다."]),
-            (("기한", "일정", "지연", "까지"), "최신 일정과 선행 작업을 맞춘 뒤 진행 순서를 정리하는 방안을 권합니다.",
-             ["최신 메일의 일정이 이전 합의를 대체하는지 요청자에게 확인하세요.",
-              "지연 원인과 필요한 입력 자료를 확인하고 선행 작업별 담당·완료 기준을 합의하세요.",
-              "확인된 일정과 산출물을 회신 초안으로 정리한 뒤 업무 기한에 반영할지 검토하세요."]),
-            (("자료", "검토", "회의", "보고"), "요청 산출물과 검토 기준을 먼저 맞추는 방안을 권합니다.",
-             ["필요한 자료의 범위·양식·최신 버전과 수신 대상을 확인하세요.",
-              "메일의 요청사항을 검토 항목으로 나누고 누락된 자료를 목록으로 정리하세요.",
-              "검토 결과와 남은 질문을 구분해 회의 안건 또는 회신 초안으로 작성하세요."]),
-        ]
-        chosen = next((row for row in scenarios if any(w in text for w in row[0])), None)
-        summary, steps = chosen[1:] if chosen else (
-            "요청 범위와 완료 기준을 확인한 뒤 실행 항목으로 나누는 방안을 권합니다.",
-            ["최신 요청과 앞선 대화의 변경사항을 비교해 현재 유효한 요청을 확인하세요.",
-             "담당·기한·산출물과 선행 작업을 요청자에게 확인하세요.",
-             "확인된 내용을 실행 순서로 정리하고 결과 검증 기준을 합의하세요."])
-        # 선택된 절차를 유발한 메일을 근거로 연결합니다.
-        related = [m["id"] for m in evidence if chosen and any(w in (m["subject"]+m["body"]).lower() for w in chosen[0])][:3]
-        refs = related or [evidence[0]["id"]]
-        return {"summary": summary, "steps": [{"text": s, "evidence_ids": refs} for s in steps],
-                "questions": ["현재 유효한 담당자·기한·완료 기준은 합의되었나요?", "후속 메일이나 첨부파일에 추가 조건이 있나요?"],
-                "cautions": ["메일 내용으로 고른 검토 절차이며 실제 원인·승인 여부·실행 결과는 확인되지 않았습니다.",
-                             "첨부파일·외부 링크·운영 시스템은 열거나 실행하지 않았습니다."]}
+        items = context.get("action_items") or []
+        if "리스" in text and any(word in text for word in ("스케줄", "스케쥴")):
+            item = next((candidate for candidate in items if any(word in candidate["quote"] for word in ("스케줄", "스케쥴", "계약 변경"))), None)
+            message_id = item["evidence_id"] if item else evidence[0]["id"]
+            quote = safe_quote(item["quote"][:240]) if item else safe_quote(evidence[0]["body"][:240])
+            return {"summary": "메일 스레드를 ‘리스 스케줄 조정’ 업무로 분류했습니다. 요청된 계약 조건과 대상 레코드를 확인한 뒤 변경안을 검토하세요.",
+                    "steps": [{"text": f"SE16에서 대상 리스 스케줄 데이터를 조회하고, 계약 변경 내용과 적용 기간·금액을 대조해 요청된 값으로 조정하는 방안을 검토합니다. 실제 반영 전 승인된 SAP 변경 절차와 검증·복구 방법을 확인하세요. 근거: “{quote}”",
+                               "evidence_ids": [message_id]}],
+                    "questions": ["요청한 계약 변경의 적용 기준일과 변경 대상 레코드가 확정됐나요?", "SAP 변경 권한과 승인 절차, 변경 후 검증 기준을 확인했나요?"],
+                    "cautions": ["SE16 조회 결과와 계약 근거를 대조한 뒤 승인된 변경 절차로 반영하세요.",
+                                 "메일만으로는 실제 변경·승인 여부를 확인할 수 없습니다."]}
+        problem_terms = ("오류", "장애", "실패", "에러", "불가", "문제", "원인", "중단", "error", "incident", "failed")
+        issue_items = [item for item in items if any(term in item["quote"].lower() for term in problem_terms)]
+        is_problem = bool(issue_items) or any(term in text for term in problem_terms)
+        steps = []
+        if items:
+            selected = (issue_items or items)[:5]
+            for item in selected:
+                title, quote, action = item["title"][:120], safe_quote(item["quote"][:240]), item["action"]
+                if is_problem:
+                    instruction = (f"‘{title}’ 문제를 메일 근거 문구대로 재현하고, 발생 시각·대상 사용자·화면/처리 건·오류 원문을 기록합니다. 근거: “{quote}”")
+                elif action == "CANCEL":
+                    instruction = f"‘{title}’ 취소 요청의 대상과 영향 범위를 요청자에게 확인한 뒤, 확인된 범위만 취소하고 관련 업무와 일정을 정리합니다. 근거: “{quote}”"
+                elif action == "COMPLETE":
+                    instruction = f"‘{title}’의 완료 산출물과 검증 결과를 확인하고, 근거가 확인된 뒤에만 완료로 처리합니다. 근거: “{quote}”"
+                elif action == "UPDATE":
+                    instruction = f"‘{title}’의 현재 값과 요청된 변경 값을 비교하고, 적용 대상·영향 범위·완료 기준을 확인한 뒤 변경합니다. 근거: “{quote}”"
+                else:
+                    instruction = f"메일에서 요청한 ‘{title}’을 실행 항목으로 나누고 담당자·완료 기준·필요 자료를 확인해 진행합니다. 근거: “{quote}”"
+                steps.append({"text": instruction, "evidence_ids": [item["evidence_id"]]})
+            labels = {"CREATE": "신규 요청", "UPDATE": "변경 요청", "CANCEL": "취소 요청", "COMPLETE": "완료 확인"}
+            request_names = list(dict.fromkeys(f"{labels.get(item['action'], '요청')} {item['title'][:55]}" for item in selected[:3]))
+            summary = (f"{context['title']} 메일에서 추출한 요청을 근거 문구와 연결했습니다: " + "; ".join(request_names)
+                       + (" 문제 재현과 원인 확인을 먼저 진행하세요." if is_problem else "."))[:560]
+        else:
+            request_lines = []
+            request_markers = ("해주세요", "해 주세", "바랍니다", "부탁", "요청드립니다", "진행해", "확인해", "please", "kindly")
+            for mail in evidence:
+                for line in mail["body"].splitlines():
+                    value = line.strip()
+                    if UNSAFE_MAIL_TEXT.search(value):
+                        continue
+                    if len(value) > 12 and any(marker in value.lower() for marker in request_markers):
+                        request_lines.append((value[:360], mail["id"]))
+            if request_lines:
+                for quote, message_id in request_lines[:3]:
+                    steps.append({"text": f"메일의 요청 문구를 기준으로 실제 대상·완료 결과·기한을 확인하고 진행 여부를 기록합니다. 근거: “{quote}”",
+                                  "evidence_ids": [message_id]})
+                summary = "업무 후보가 명시적으로 추출되지는 않아, 메일 본문에서 요청 문장을 찾아 실행 확인 항목으로 정리했습니다."
+            else:
+                mail = evidence[0]
+                quote = safe_quote(mail["body"].strip()[:240]) or mail["subject"][:120]
+                subject = mail["subject"][:120]
+                steps = [{"text": f"메일 ‘{subject}’의 내용을 요청자와 확인해 원하는 결과·담당자·기한을 확정한 뒤 업무로 등록합니다. 근거: “{quote}”",
+                          "evidence_ids": [mail["id"]]}]
+                summary = f"메일 ‘{subject}’에서 확정 가능한 실행 요청을 찾지 못했습니다. 원문 내용을 확인해 업무 범위를 먼저 합의하세요."
+            is_problem = is_problem or any(term in text for term in problem_terms)
+            if is_problem and len(steps) < 5:
+                refs = [mail["id"] for mail in evidence[:3]]
+                steps.extend([
+                    {"text": "문제가 발생한 시간·사용자·업무 단계와 재현 절차를 적고, 정확한 오류 문구와 관련 로그를 확보합니다.", "evidence_ids": refs},
+                    {"text": "같은 스레드에서 정상 동작한 조건과 이후 변경사항을 비교해 원인 후보를 좁힙니다. 설정·권한·기준정보·연계 중 무엇이 달라졌는지 확인합니다.", "evidence_ids": refs},
+                    {"text": "수정안은 테스트 환경에서 재현 건으로 검증하고, 영향 범위와 원복 방법을 확인한 뒤 요청자에게 결과를 회신합니다.", "evidence_ids": refs},
+                ][:5-len(steps)])
+        questions = (["같은 오류를 재현할 수 있는 계정·처리 건·발생 시각은 무엇인가요?", "최근 변경사항과 오류 로그를 확인했나요?"]
+                     if is_problem else ["메일에서 추출한 요청의 담당자·기한·완료 기준이 현재도 유효한가요?", "스레드의 최신 회신이 앞선 요청을 변경하거나 취소했나요?"])
+        return {"summary": summary, "steps": steps[:5], "questions": questions,
+                "cautions": ["메일의 요청 문구와 저장된 업무 후보를 바탕으로 만든 제안입니다. 적용 전 최신 회신과 실제 상태를 확인하세요.",
+                             "해결 여부·승인 여부·시스템 변경 결과를 확인된 사실처럼 가정하지 않았습니다."]}
 
     @staticmethod
     def validate(result, evidence):
@@ -131,7 +197,7 @@ class Solutions:
         prompt = "\n".join((ROOT / p).read_text(encoding="utf-8") for p in
                            ("main_prompt", "prompts/common.md", "prompts/07_solution.md"))
         fingerprint = hashlib.sha256(dump({"context": context, "engine": self.cfg["engine"],
-            "model": self.cfg.get("ollama_model"), "prompt": prompt, "version": 1}).encode()).hexdigest()
+            "model": self.cfg.get("ollama_model"), "prompt": prompt, "version": 2}).encode()).hexdigest()
         params = (context["target_kind"], context["target_id"], fingerprint)
         existing = self.store.rows("SELECT * FROM solutions WHERE target_kind=? AND target_id=? AND fingerprint=?", params)
         if existing and not regenerate:
