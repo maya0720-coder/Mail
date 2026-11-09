@@ -123,7 +123,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(result["imported"]+result["duplicates"], 5)
         with self.request("/api/state", headers={"X-App-Token": self.token}) as response:
             state = json.load(response)
-        self.assertEqual(len(state["proposals"]), 3)
+        self.assertEqual(len(state["proposals"]), 2)
         with self.assertRaises(HTTPError) as error:
             self.request("/api/import", {"messages": "잘못된 형식"}, {"X-App-Token": self.token})
         self.assertEqual(error.exception.code, 400)
@@ -151,6 +151,7 @@ class WebTests(unittest.TestCase):
         auto_tasks=[task for task in all_tasks['tasks'] if task['auto_generated']]
         self.assertTrue(auto_tasks)
         self.assertTrue(all(task['summary'] for task in auto_tasks))
+        self.assertTrue(all(task['topic_summary'] and task['thread_messages'] for task in auto_tasks))
         status=all_tasks['states'][0]
         query=urlencode({'status':status})
         with self.request('/api/tasks?'+query,headers=headers) as response:filtered=json.load(response)
@@ -180,7 +181,8 @@ class WebTests(unittest.TestCase):
             self.request('/api/solution',{'topic_id':group['id']})
         self.assertEqual(error.exception.code,403)
         with self.request('/api/solution',{'topic_id':group['id']},headers) as response:result=json.load(response)
-        self.assertEqual(len(result['evidence']),2)
+        self.assertEqual(len(result['evidence']),1)
+        self.assertIn('최신 메일 요약 1건',result['scope'])
         self.assertGreater(len(result['steps']),0)
         with self.assertRaises(HTTPError) as error:
             self.request('/api/solution',{'topic_id':'missing'},headers)

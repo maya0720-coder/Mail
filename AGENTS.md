@@ -38,3 +38,7 @@ The existing history uses short, descriptive messages, including Korean text, wi
 
 Use `config.example.json` as the template and keep personal settings local in ignored `config.json`. Treat collected mail and the `data/` directory as sensitive. Keep demo and test workflows pointed at demo or temporary data directories.
 
+## Change History
+
+Before modifying the application, review `docs/변경이력.md` for relevant prior decisions and behavior changes. After each code or prompt change, append a dated entry describing the affected files, user-visible behavior, and validation performed. Keep entries concise and never include mail content, credentials, or personal configuration.
+

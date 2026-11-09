@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from mailbrain.core import Store, Pipeline, KST, Engine
+from mailbrain.core import Store, Pipeline, KST, Engine, rule_analysis
 from mailbrain.demo import messages
 from mailbrain.topics import Topics, clean_subject, new_body, CATEGORIES
 from mailbrain.reporting import build_document, write_pdf, is_auth_notification
@@ -33,7 +33,26 @@ class TopicsHistoryTests(unittest.TestCase):
         groups = Topics(self.store).build()
         self.assertEqual(len(groups), 1)
         self.assertEqual(groups[0]["message_count"], 2)
-        self.assertEqual(groups[0]["proposal_count"], 2)
+        self.assertEqual(groups[0]["proposal_count"], 1)
+        candidate_messages = [m for m in groups[0]["messages"] if m["proposals"]]
+        self.assertEqual(len(candidate_messages), 1)
+        self.assertEqual(candidate_messages[0]["id"], groups[0]["messages"][0]["id"])
+
+    def test_latest_business_mail_is_not_misclassified_from_old_approval_thread(self):
+        older = {**self.mails[0], "id": "old-approval-word", "thread_id": "budget-thread",
+                 "subject": "[골프존]예산관리 개선 협의", "body": "전자결재 관련 과거 설명입니다. 확인 부탁드립니다."}
+        latest = {**self.mails[1], "id": "latest-budget-request", "thread_id": "budget-thread",
+                  "subject": "[골프존]예산관리 개선 협의", "sent_at": "2026-11-09T10:00:00+09:00",
+                  "body": "ZCOR0520 예산관리 화면에서 추가 생성 기능을 반영해 주세요."}
+        self.pipeline.ingest([older, latest])
+        topic = next(g for g in Topics(self.store).build() if g["id"])
+        self.assertEqual(topic["category"], "SAP ERP 개선 과제")
+
+    def test_generic_confirmation_line_is_not_a_task_candidate(self):
+        mail = {**self.mails[0], "body": "내용 확인 부탁드립니다.\n예산 그룹의 체크 로직을 수정해 주세요."}
+        analysis = rule_analysis(mail, self.cfg)
+        self.assertEqual(len(analysis["tasks"]), 1)
+        self.assertNotIn("내용 확인 부탁", analysis["tasks"][0]["summary"])
 
     def test_subject_fallback_groups_broken_thread_ids(self):
         first = {**self.mails[0],"thread_id":"t1","subject":"QA 서버 시스템 카피 문의"}

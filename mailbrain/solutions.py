@@ -4,7 +4,7 @@ import json
 import re
 
 from .core import Engine, ROOT, audited, dump, now
-from .topics import Topics, new_body
+from .topics import Topics, brief, new_body
 
 
 UNSAFE_MAIL_TEXT = re.compile(r"(?i)password|credential|ignore.{0,24}(instruction|command)|run.{0,16}command|비밀번호|명령.{0,16}실행|지침.{0,16}무시")
@@ -55,17 +55,17 @@ class Solutions:
             "SELECT * FROM messages WHERE excluded=0 ORDER BY COALESCE(received_at,sent_at) DESC,id DESC") if m["id"] in ids]
         if not visible:
             raise ValueError("분석할 수 있는 메일 근거가 없습니다. 제외된 메일은 솔루션에 사용하지 않습니다.")
-        selected = visible[:self.LIMIT]
-        origin = next((m for m in visible if m["id"] == source_id), None)
-        if origin and origin not in selected:
-            selected[-1] = origin
+        # A solution is based on the final mail's stored summary, not a bundle
+        # of every message body and subject in the conversation.
+        selected = visible[:1]
         evidence = []
         action_items = {}
         for m in selected:
-            body = new_body(m["body"]) or m["body"]
+            raw_body = new_body(m["body"]) or m["body"]
+            body = (m.get("summary") or brief(raw_body, limit=1200)).strip()[:1600]
             evidence.append({"id": m["id"], "subject": m["subject"], "sender": m["sender"],
-                             "at": m["received_at"] or m["sent_at"], "body": body[:2200],
-                             "truncated": len(body) > 2200})
+                             "at": m["received_at"] or m["sent_at"], "body": body,
+                             "truncated": False})
             try:
                 analysis = json.loads(m.get("analysis") or "{}")
             except (TypeError, json.JSONDecodeError):
@@ -78,20 +78,22 @@ class Solutions:
                     continue
                 if UNSAFE_MAIL_TEXT.search(quote):
                     continue
-                if quote not in body:
+                if quote not in raw_body:
                     continue
                 key = (action, re.sub(r"\s+", " ", item_title).strip().casefold())
-                action_items[key] = {"title": item_title.strip(), "action": action, "quote": quote.strip(),
+                action_items[key] = {"title": item_title.strip(), "action": action, "quote": body,
                                      "evidence_id": m["id"]}
-        return {"title": title, "target_kind": kind, "target_id": target, "task": task,
+        task_context = ({key: task.get(key) for key in ("status", "project", "assignee", "due_date")}
+                        if task else None)
+        return {"title": title, "target_kind": kind, "target_id": target, "task": task_context,
                 "evidence": evidence, "action_items": list(action_items.values()),
-                "task_summary": task.get("summary", "") if task else "", "total_messages": len(visible),
-                "scope": f"관련 메일 {len(visible)}건 중 최근 최대 {self.LIMIT}건과 최초 업무 근거를 포함해 {len(evidence)}건 검토 · 메일별 새 본문 최대 2,200자"}
+                "latest_summary": evidence[0]["body"], "total_messages": len(visible),
+                "scope": f"대화의 최신 메일 요약 1건을 검토했습니다. 전체 대화 메일 {len(visible)}건의 본문은 제안 생성 입력에서 제외했습니다."}
 
     @staticmethod
     def rules(context):
         evidence = context["evidence"]
-        text = "\n".join(m["subject"] + "\n" + m["body"] for m in evidence).lower()
+        text = ("\n".join(m["body"] for m in evidence) + "\n" + context["title"]).lower()
         items = context.get("action_items") or []
         if "리스" in text and any(word in text for word in ("스케줄", "스케쥴")):
             item = next((candidate for candidate in items if any(word in candidate["quote"] for word in ("스케줄", "스케쥴", "계약 변경"))), None)
@@ -110,22 +112,20 @@ class Solutions:
         if items:
             selected = (issue_items or items)[:5]
             for item in selected:
-                title, quote, action = item["title"][:120], safe_quote(item["quote"][:240]), item["action"]
+                quote, action = safe_quote(item["quote"][:240]), item["action"]
                 if is_problem:
-                    instruction = (f"‘{title}’ 문제를 메일 근거 문구대로 재현하고, 발생 시각·대상 사용자·화면/처리 건·오류 원문을 기록합니다. 근거: “{quote}”")
+                    instruction = (f"요약에서 확인된 문제를 재현하고, 발생 시각·대상 사용자·화면/처리 건·오류 원문을 기록합니다. 근거: “{quote}”")
                 elif action == "CANCEL":
-                    instruction = f"‘{title}’ 취소 요청의 대상과 영향 범위를 요청자에게 확인한 뒤, 확인된 범위만 취소하고 관련 업무와 일정을 정리합니다. 근거: “{quote}”"
+                    instruction = f"취소 요청의 대상과 영향 범위를 확인한 뒤, 확인된 범위만 취소하고 관련 업무와 일정을 정리합니다. 근거: “{quote}”"
                 elif action == "COMPLETE":
-                    instruction = f"‘{title}’의 완료 산출물과 검증 결과를 확인하고, 근거가 확인된 뒤에만 완료로 처리합니다. 근거: “{quote}”"
+                    instruction = f"완료 산출물과 검증 결과를 확인하고, 근거가 확인된 뒤에만 완료로 처리합니다. 근거: “{quote}”"
                 elif action == "UPDATE":
-                    instruction = f"‘{title}’의 현재 값과 요청된 변경 값을 비교하고, 적용 대상·영향 범위·완료 기준을 확인한 뒤 변경합니다. 근거: “{quote}”"
+                    instruction = f"현재 값과 요청된 변경 값을 비교하고, 적용 대상·영향 범위·완료 기준을 확인한 뒤 변경합니다. 근거: “{quote}”"
                 else:
-                    instruction = f"메일에서 요청한 ‘{title}’을 실행 항목으로 나누고 담당자·완료 기준·필요 자료를 확인해 진행합니다. 근거: “{quote}”"
+                    instruction = f"요약된 요청을 실행 항목으로 나누고 담당자·완료 기준·필요 자료를 확인해 진행합니다. 근거: “{quote}”"
                 steps.append({"text": instruction, "evidence_ids": [item["evidence_id"]]})
-            labels = {"CREATE": "신규 요청", "UPDATE": "변경 요청", "CANCEL": "취소 요청", "COMPLETE": "완료 확인"}
-            request_names = list(dict.fromkeys(f"{labels.get(item['action'], '요청')} {item['title'][:55]}" for item in selected[:3]))
-            summary = (f"{context['title']} 메일에서 추출한 요청을 근거 문구와 연결했습니다: " + "; ".join(request_names)
-                       + (" 문제 재현과 원인 확인을 먼저 진행하세요." if is_problem else "."))[:560]
+            summary = (("최신 메일 요약에서 확인된 문제를 기준으로 재현과 원인을 확인하세요." if is_problem
+                        else "최신 메일 요약에서 확인된 요청을 현재 상태와 대조해 처리하세요."))
         else:
             request_lines = []
             request_markers = ("해주세요", "해 주세", "바랍니다", "부탁", "요청드립니다", "진행해", "확인해", "please", "kindly")
@@ -144,10 +144,9 @@ class Solutions:
             else:
                 mail = evidence[0]
                 quote = safe_quote(mail["body"].strip()[:240]) or mail["subject"][:120]
-                subject = mail["subject"][:120]
-                steps = [{"text": f"메일 ‘{subject}’의 내용을 요청자와 확인해 원하는 결과·담당자·기한을 확정한 뒤 업무로 등록합니다. 근거: “{quote}”",
+                steps = [{"text": f"요약된 요청 내용을 요청자와 확인해 원하는 결과·담당자·기한을 확정한 뒤 업무로 등록합니다. 근거: “{quote}”",
                           "evidence_ids": [mail["id"]]}]
-                summary = f"메일 ‘{subject}’에서 확정 가능한 실행 요청을 찾지 못했습니다. 원문 내용을 확인해 업무 범위를 먼저 합의하세요."
+                summary = "최신 메일 요약에서 확정 가능한 실행 요청을 찾지 못했습니다. 원하는 결과와 업무 범위를 먼저 확인하세요."
             is_problem = is_problem or any(term in text for term in problem_terms)
             if is_problem and len(steps) < 5:
                 refs = [mail["id"] for mail in evidence[:3]]
@@ -197,7 +196,7 @@ class Solutions:
         prompt = "\n".join((ROOT / p).read_text(encoding="utf-8") for p in
                            ("main_prompt", "prompts/common.md", "prompts/07_solution.md"))
         fingerprint = hashlib.sha256(dump({"context": context, "engine": self.cfg["engine"],
-            "model": self.cfg.get("ollama_model"), "prompt": prompt, "version": 2}).encode()).hexdigest()
+            "model": self.cfg.get("ollama_model"), "prompt": prompt, "version": 3}).encode()).hexdigest()
         params = (context["target_kind"], context["target_id"], fingerprint)
         existing = self.store.rows("SELECT * FROM solutions WHERE target_kind=? AND target_id=? AND fingerprint=?", params)
         if existing and not regenerate:
@@ -206,7 +205,9 @@ class Solutions:
         result = self.rules(context)
         if self.cfg["engine"] == "ollama":
             try:
-                result = self.validate(Engine(self.cfg).role("07_solution", context), context["evidence"])
+                model_context = {"latest_summary": context["latest_summary"], "task": context["task"],
+                                 "evidence": [{"id": item["id"], "body": item["body"]} for item in context["evidence"]]}
+                result = self.validate(Engine(self.cfg).role("07_solution", model_context), context["evidence"])
                 mode = "로컬 AI 해결 초안"
             except Exception:
                 result, fallback = self.rules(context), True

@@ -102,6 +102,7 @@ class Topics:
         for group in buckets.values():
             group.sort(key=lambda m: (m["received_at"] or m["sent_at"], m["id"]), reverse=True)
             title = clean_subject(group[0]["subject"])
+            candidate_mail = next((m for m in group if m.get("direction", "inbound") == "inbound"), None)
             key = min(clean_subject(m["subject"]).casefold() for m in group)
             identity = "topic-" + hashlib.sha256((key + min(m["thread_id"] for m in group)).encode()).hexdigest()[:16]
             children = []
@@ -110,13 +111,17 @@ class Topics:
                                  "sent_at": mail["sent_at"], "received_at": mail["received_at"] or mail["sent_at"],
                                  "direction": mail.get("direction", "inbound"),
                                  "date_basis": "수신일" if mail["received_at"] else "발송일 대체",
-                                 "summary": brief(mail["body"]), "proposals": by_mail.get(mail["id"], [])})
-            group_text = " ".join(m["subject"] + " " + brief(m["body"]) for m in group)
+                                 "summary": (mail.get("summary") or brief(mail["body"])),
+                                 "proposals": by_mail.get(mail["id"], []) if candidate_mail and mail["id"] == candidate_mail["id"] else []})
+            latest = group[0]
+            latest_text_mail = next((m for m in group if m.get("direction", "inbound") == "inbound"), latest)
+            group_text = latest_text_mail["subject"] + " " + brief(new_body(latest_text_mail["body"]))
             is_approval = category(group_text) == "전자결재"
             lowered = group_text.lower()
             approval_status = ("결재 완료" if any(word in lowered for word in ("결재 완료", "결재완료", "승인 완료", "승인완료", "결재가 완료", "최종 승인", "approved", "approval completed")) else "진행 알림") if is_approval else None
+            main_summary = next((m["summary"] for m in children if candidate_mail and m["id"] == candidate_mail["id"]), children[0]["summary"])
             result.append({"id": identity, "title": title, "category": category(group_text), "approval_status": approval_status, "date_basis": children[0]["date_basis"],
-                           "latest_at": children[0]["received_at"], "latest_summary": children[0]["summary"],
+                           "latest_at": children[0]["received_at"], "latest_summary": main_summary,
                            "message_count": len(group), "proposal_count": sum(len(m["proposals"]) for m in children),
                            "messages": children})
         return sorted(result, key=lambda g: (g["latest_at"], g["id"]), reverse=True)

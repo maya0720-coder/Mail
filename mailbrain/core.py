@@ -16,6 +16,16 @@ KST = timezone(timedelta(hours=9))
 STATE_ORDER = ["미등록", "등록완료", "진행중", "대기", "완료", "취소"]
 STATES = set(STATE_ORDER)
 STATUS_ALIASES = {"확인필요": "미등록", "할일": "등록완료"}
+GENERIC_REQUEST_PATTERNS = (
+    re.compile(r"^(?:내용|관련건|해당건|상기(?:의)?내용)(?:확인|검토).{0,15}(?:부탁|요청)"),
+    re.compile(r"^추가로?답변작성중문의사항이생겨.{0,50}확인요청"),
+    re.compile(r"^혹시.{0,80}(?:필요하시다면|필요하시면).{0,20}(?:코멘트|연락)부탁"),
+)
+
+
+def generic_followup(text):
+    normalized = re.sub(r"\s+", "", str(text or "")).casefold()
+    return any(pattern.search(normalized) for pattern in GENERIC_REQUEST_PATTERNS)
 
 
 def canonical_status(value):
@@ -285,14 +295,30 @@ class Store:
                 task["topic_id"] = topic["id"]
                 task["topic_title"] = topic["title"]
                 task["category"] = topic["category"]
+                task["approval_status"] = topic["approval_status"]
                 task["topic_message_count"] = topic["message_count"]
+                task["topic_summary"] = topic["latest_summary"]
+                task["thread_messages"] = [{key: message[key] for key in ("id", "subject", "sender", "sent_at", "received_at")}
+                                            for message in topic["messages"]]
                 task["display_title"] = task_title(topic["title"], topic["latest_summary"])
             else:
                 task["topic_id"] = "task-" + str(task["id"])
                 task["topic_title"] = task.get("title") or "제목 없는 업무"
                 task["category"] = "상시업무"
+                task["approval_status"] = None
                 task["topic_message_count"] = 0
+                task["topic_summary"] = task.get("summary") or ""
+                task["thread_messages"] = []
                 task["display_title"] = task_title(task["title"] or "제목 없는 업무")
+            processed = task["status"] in {"완료", "취소"}
+            if task["category"] == "전자결재":
+                task["work_bucket"] = "전자결재 처리완료" if processed else "전자결재 처리미완료"
+            elif processed:
+                task["work_bucket"] = "처리완료"
+            elif int(task.get("auto_generated") or 0) and not task.get("read_at"):
+                task["work_bucket"] = "확인필요"
+            else:
+                task["work_bucket"] = "확인완료(미처리)"
         counts = {s: 0 for s in STATE_ORDER}
         scope_where = "deleted_at IS NULL" if scope == "active" else "deleted_at IS NOT NULL"
         for row in self.rows("SELECT status,count(*) AS n FROM tasks WHERE " + scope_where + " GROUP BY status"):
@@ -367,6 +393,24 @@ class Store:
             cursor = db.execute("UPDATE tasks SET read_at=? WHERE id=? AND deleted_at IS NULL AND read_at IS NULL", (now(), task_id))
             if not cursor.rowcount and not db.execute("SELECT 1 FROM tasks WHERE id=? AND deleted_at IS NULL", (task_id,)).fetchone():
                 raise ValueError("읽음 처리할 업무를 찾지 못했습니다.")
+
+    def mark_task_unprocessed(self, task_id):
+        with self.connect() as db:
+            task = db.execute("SELECT * FROM tasks WHERE id=? AND deleted_at IS NULL", (task_id,)).fetchone()
+            if not task:
+                raise ValueError("미완료로 되돌릴 업무를 찾지 못했습니다.")
+            if task["status"] not in {"완료", "취소"}:
+                raise ValueError("이미 처리 미완료 상태입니다.")
+            prior_status = "등록완료"
+            for event in db.execute("SELECT before_json,after_json FROM events WHERE task_id=? ORDER BY seq DESC", (task_id,)):
+                try:
+                    before, after = json.loads(event["before_json"]), json.loads(event["after_json"])
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if after and after.get("status") == task["status"] and before and before.get("status") not in {"완료", "취소"}:
+                    prior_status = before["status"]
+                    break
+            self.change(db, task_id, {"status": prior_status, "manual": 1}, "사용자", kind="처리미완료")
 
     def refresh_auto_thread(self, db, thread_id, cfg, mark_unread=False):
         from .policy import task_recipient, reply_requested
@@ -493,6 +537,91 @@ class Store:
                 self.refresh_auto_thread(db, thread_id, cfg)
         return len(thread_ids)
 
+    def compact_pending_proposals(self):
+        """Collapse legacy line-by-line proposals into one review item per mail."""
+        from .topics import task_title
+        compacted = 0
+        with self.connect() as db:
+            sources = db.execute(
+                "SELECT source_id FROM proposals WHERE state='대기' GROUP BY source_id HAVING count(*)>2"
+            ).fetchall()
+            for source in sources:
+                rows = db.execute(
+                    "SELECT p.* FROM proposals p WHERE p.source_id=? AND p.state='대기' ORDER BY p.rowid",
+                    (source["source_id"],),
+                ).fetchall()
+                mail = db.execute("SELECT subject,summary,analysis FROM messages WHERE id=?", (source["source_id"],)).fetchone()
+                if not mail or len(rows) <= 2:
+                    continue
+                payloads = []
+                for row in rows:
+                    try:
+                        item = json.loads(row["payload"])
+                    except (TypeError, json.JSONDecodeError):
+                        item = {}
+                    if isinstance(item, dict):
+                        payloads.append((row, item))
+                if len(payloads) <= 2:
+                    continue
+                try:
+                    analysis = json.loads(mail["analysis"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    analysis = {}
+                summary = (analysis.get("summary") if isinstance(analysis, dict) else None) or mail["summary"] or ""
+                titles = list(dict.fromkeys(item.get("title", "") for _, item in payloads if item.get("title")))
+                title = task_title(mail["subject"] or "제목 없는 메일", " ".join(titles))
+                actions = {}
+                for row, _ in payloads:
+                    actions[row["action"]] = actions.get(row["action"], 0) + 1
+                action = max(actions, key=actions.get)
+                quotes = [item.get("evidence_quote", "") for _, item in payloads if item.get("evidence_quote")]
+                base = next((item for _, item in payloads if item.get("evidence_quote")), payloads[0][1])
+                merged = {**base, "title": title, "summary": summary,
+                          "evidence_quote": quotes[0] if quotes else "",
+                          "merged_candidate_count": len(payloads),
+                          "merged_titles": titles[:30]}
+                targets = {row["target_id"] for row, _ in payloads}
+                target_id = next(iter(targets)) if len(targets) == 1 else None
+                for row, _ in payloads:
+                    db.execute("UPDATE proposals SET state='통합됨' WHERE id=?", (row["id"],))
+                db.execute(
+                    "INSERT INTO proposals(id,source_id,action,target_id,payload,reason,state) VALUES(?,?,?,?,?,?, '대기')",
+                    (uuid.uuid4().hex[:12], source["source_id"], action, target_id, dump(merged),
+                     f"기존 업무 후보 {len(payloads)}개를 메일 단위 요약 후보 하나로 통합했습니다."),
+                )
+                compacted += 1
+        return compacted
+
+    def archive_superseded_proposals(self):
+        """Keep review proposals only for the newest inbound message in each thread."""
+        with self.connect() as db:
+            latest = db.execute("""
+                SELECT id FROM (
+                    SELECT id,thread_id,ROW_NUMBER() OVER (
+                        PARTITION BY thread_id ORDER BY COALESCE(received_at,sent_at) DESC,id DESC
+                    ) AS position
+                    FROM messages WHERE excluded=0 AND direction='inbound'
+                ) WHERE position=1
+            """).fetchall()
+            latest_ids = {row["id"] for row in latest}
+            pending = db.execute("SELECT id,source_id FROM proposals WHERE state='대기'").fetchall()
+            superseded = [row["id"] for row in pending if row["source_id"] not in latest_ids]
+            db.executemany("UPDATE proposals SET state='이전 메일' WHERE id=?", ((identifier,) for identifier in superseded))
+            return len(superseded)
+
+    def archive_generic_proposals(self):
+        archived = 0
+        with self.connect() as db:
+            for row in db.execute("SELECT id,payload FROM proposals WHERE state='대기'").fetchall():
+                try:
+                    payload = json.loads(row["payload"])
+                except (TypeError, json.JSONDecodeError):
+                    payload = {}
+                if generic_followup(payload.get("evidence_quote", "")):
+                    db.execute("UPDATE proposals SET state='불필요' WHERE id=?", (row["id"],))
+                    archived += 1
+        return archived
+
 
 class Engine:
     def __init__(self, config):
@@ -557,13 +686,16 @@ def normalize_message(message, cfg):
 
 def rule_analysis(message, cfg):
     # 학습용 결정 규칙입니다. 자유 형식 메일에 대한 AI 분석을 가장하지 않습니다.
-    body = re.split(r"(?m)^\s*(?:On .+wrote:|보낸 사람:|-----Original Message-----|>)", message["body"])[0]
+    from .topics import new_body
+    body = new_body(message["body"])
     candidates = []
     project_match = re.search(r"\[([^\]]+)\]", message["subject"])
     project = project_match.group(1) if project_match else "미분류"
     for line in body.splitlines():
         line = line.strip()
-        if not line or not re.search(r"해주세요|바랍니다|부탁|요청|변경|취소|완료했습니다|완료되었습니다", line):
+        if not line or not re.search(r"해\s*주세요|바랍니다|부탁|요청|변경|수정|추가|삭제|취소|완료했습니다|완료되었습니다", line):
+            continue
+        if generic_followup(line):
             continue
         dates = re.findall(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)", line)
         action = "CANCEL" if "취소" in line else "COMPLETE" if re.search(r"완료했습니다|완료되었습니다", line) else "UPDATE" if "변경" in line else "CREATE"
@@ -579,20 +711,27 @@ def rule_analysis(message, cfg):
         candidates.append({"title": title, "project": project, "assignee": assignee,
                            "due_date": dates[-1] if dates else None, "action": action,
                            "evidence_quote": line, "needs_confirmation": True})
-    # 긴 회신 체인에서 반복된 요청을 줄이고, 후보 제한 때문에 원문 수집이 실패하지 않게 합니다.
+    # 규칙 모드는 의미 요약 모델이 없으므로 메일 전체 요청을 하나의 검토 후보로 묶습니다.
     unique = list({(item["title"], item["action"], item["evidence_quote"]): item for item in candidates}.values())
-    summary = body[:500] or message["subject"]
-    omitted = max(0, len(unique) - 30)
-    if omitted:
-        summary = f"[확인 필요: 요청 후보 {len(unique)}개 중 처음 30개만 추출했습니다. 나머지는 원문을 확인하세요.]\n" + summary
-    return {"summary": summary, "tasks": unique[:30], "omitted_candidate_count": omitted}
+    summary = " / ".join(dict.fromkeys(item["evidence_quote"] for item in unique))[:1200]
+    if not unique:
+        return {"summary": body[:500] or message["subject"], "tasks": []}
+    actions = {}
+    for item in unique:
+        actions[item["action"]] = actions.get(item["action"], 0) + 1
+    representative = dict(max(unique, key=lambda item: actions[item["action"]]))
+    from .topics import task_title
+    representative["title"] = task_title(message["subject"], " ".join(item["title"] for item in unique))
+    representative["summary"] = summary
+    representative["merged_candidate_count"] = len(unique)
+    return {"summary": summary, "tasks": [representative], "omitted_candidate_count": 0}
 
 
 def validate_analysis(analysis, message):
     if not isinstance(analysis, dict) or not isinstance(analysis.get("summary"), str) or not isinstance(analysis.get("tasks"), list):
         raise ValueError("분석 출력 스키마가 올바르지 않습니다.")
-    if len(analysis["tasks"]) > 30:
-        raise ValueError("메일 한 건당 업무 후보는 최대 30개입니다.")
+    if len(analysis["tasks"]) > 2:
+        raise ValueError("메일 한 건당 업무 후보는 최대 2개입니다.")
     for item in analysis["tasks"]:
         if not isinstance(item, dict) or not isinstance(item.get("title"), str) or not item["title"].strip():
             raise ValueError("업무명이 필요합니다.")
@@ -614,6 +753,9 @@ class Pipeline:
         self.store.bind_owner(cfg["user_email"])
         self.store.apply_message_policy(cfg)
         self.store.backfill_auto_tasks(cfg)
+        self.store.archive_generic_proposals()
+        self.store.compact_pending_proposals()
+        self.store.archive_superseded_proposals()
 
     def ingest(self, messages):
         engine = Engine(self.cfg)
@@ -669,9 +811,15 @@ class Pipeline:
                                 message["id"], message["thread_id"], message["subject"], message["sender"],
                                 dump({"to": message["to"], "cc": message.get("cc", "")}), message["sent_at"],
                                 message["body"], analysis["summary"], message.get("source", "import"), now(), dump(analysis), message.get("received_at"), message["direction"]))
+                        if message["direction"] == "inbound":
+                            db.execute("""UPDATE proposals SET state='이전 메일' WHERE state='대기' AND source_id IN
+                                (SELECT id FROM messages WHERE thread_id=? AND id<>?)""",
+                                       (message["thread_id"], message["id"]))
                         for index, item in enumerate(analysis["tasks"] if message["direction"] == "inbound" else []):
                             matches = [t for t in related if t["title"] == item["title"]]
                             target = matches[0]["id"] if len(matches) == 1 else None
+                            if not target and item["action"] != "CREATE" and len(related) == 1:
+                                target = related[0]["id"]
                             if index < len(link_list) and isinstance(link_list[index], dict):
                                 suggested = link_list[index].get("target_task_id")
                                 if suggested in {t["id"] for t in related}:
@@ -683,7 +831,8 @@ class Pipeline:
                             if action != "CREATE" and not target:
                                 reason = "연결할 기존 업무를 선택하세요."
                             db.execute("INSERT INTO proposals(id,source_id,action,target_id,payload,reason) VALUES(?,?,?,?,?,?)",
-                                       (uuid.uuid4().hex[:12], message["id"], action, target, dump(item), reason))
+                                       (uuid.uuid4().hex[:12], message["id"], action, target,
+                                        dump({**item, "summary": item.get("summary") or analysis["summary"]}), reason))
                         if message["direction"] == "inbound":
                             self.store.refresh_auto_thread(db, message["thread_id"], self.cfg,
                                                            mark_unread=task_recipient({**message, "cc": message.get("cc", ""),
@@ -692,6 +841,7 @@ class Pipeline:
                 except (ValueError, TypeError, KeyError) as exc:
                     counts["failed"] += 1
                     counts["errors"].append({"position": counts["imported"] + counts["duplicates"] + counts["excluded"] + counts["failed"], "reason": str(exc)})
+            self.store.archive_generic_proposals()
             self.wiki(engine)
             status = "일부실패" if counts["failed"] else "완료"
         except Exception:

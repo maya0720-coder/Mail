@@ -33,7 +33,7 @@ class PipelineTests(unittest.TestCase):
         second = self.pipeline.ingest(self.mails)
         self.assertEqual((first["imported"], second["duplicates"]), (5, 5))
         self.assertEqual(len(self.store.state()["messages"]), 5)
-        self.assertEqual(len(self.store.state()["proposals"]), 3)
+        self.assertEqual(len(self.store.state()["proposals"]), 2)
 
     def test_direct_recipient_gets_auto_task_before_proposal_approval(self):
         self.ingest_one()
@@ -261,14 +261,44 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Pipeline({**self.cfg, "user_email": "other@example.com"}, self.store)
 
-    def test_large_request_mail_preserved_with_visible_limit_notice(self):
+    def test_large_request_mail_preserved_as_one_summary_task(self):
         body = "\n".join(f"업무: 자료 검토 {index}; 준비해주세요." for index in range(40))
         result = self.pipeline.ingest([{**self.mails[0], "body": body}])
         self.assertEqual(result["failed"], 0)
         mail = self.store.rows("SELECT * FROM messages")[0]
         self.assertEqual(mail["body"], body)
-        self.assertIn("처음 30개", mail["summary"])
-        self.assertEqual(len(self.store.state()["proposals"]), 30)
+        self.assertEqual(len(self.store.state()["proposals"]), 1)
+        payload = json.loads(self.store.state()["proposals"][0]["payload"])
+        self.assertEqual(payload["merged_candidate_count"], 40)
+        self.assertIn("자료 검토 0", payload["summary"])
+
+    def test_legacy_pending_candidates_are_compacted_without_losing_history(self):
+        self.ingest_one()
+        mail = self.store.rows("SELECT id FROM messages")[0]
+        for index in range(3):
+            payload = {"title": f"분리된 요청 {index}", "project": "프로젝트", "action": "CREATE",
+                       "evidence_quote": self.mails[0]["body"].splitlines()[0]}
+            with self.store.connect() as db:
+                db.execute("INSERT INTO proposals(id,source_id,action,payload) VALUES(?,?,?,?)",
+                           (f"legacy-{index}", mail["id"], "CREATE", json.dumps(payload, ensure_ascii=False)))
+        Pipeline(self.cfg, self.store)
+        pending = self.store.state()["proposals"]
+        self.assertEqual(sum(p["source_id"] == mail["id"] for p in pending), 1)
+        compacted = next(p for p in pending if p["source_id"] == mail["id"])
+        self.assertEqual(json.loads(compacted["payload"])["merged_candidate_count"], 4)
+        archived = self.store.rows("SELECT state FROM proposals WHERE source_id=? AND state='통합됨'", (mail["id"],))
+        self.assertEqual(len(archived), 4)
+
+    def test_generic_confirmation_proposal_is_archived_on_startup(self):
+        self.ingest_one()
+        mail = self.store.rows("SELECT id FROM messages")[0]
+        with self.store.connect() as db:
+            db.execute("INSERT INTO proposals(id,source_id,action,payload) VALUES(?,?,?,?)",
+                       ("generic-confirmation", mail["id"], "CREATE",
+                        json.dumps({"title": "확인", "evidence_quote": "내용 확인부탁드립니다."}, ensure_ascii=False)))
+        Pipeline(self.cfg, self.store)
+        self.assertEqual(self.store.rows("SELECT state FROM proposals WHERE id='generic-confirmation'")[0]["state"], "불필요")
+        self.assertFalse(any(p["id"] == "generic-confirmation" for p in self.store.state()["proposals"]))
 
 
 if __name__ == "__main__":
