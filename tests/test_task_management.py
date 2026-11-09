@@ -62,6 +62,20 @@ class TaskManagementTests(unittest.TestCase):
             self.store.edit_task(task['id'],{'status':status})
             self.assertEqual(self.store.list_tasks(status=status)['filtered_count'],1)
 
+    def test_backfill_removes_existing_auto_task_when_mail_is_unrelated(self):
+        self.pipeline.ingest([self.mail])
+        task = next(task for task in self.store.state()["tasks"] if task["auto_generated"] == 1)
+        self.assertEqual(task["manual"], 0)
+        with self.store.connect() as db:
+            db.execute("UPDATE messages SET subject=?,body=?,analysis=? WHERE id=?",
+                       ("주말 영화 추천", "주말에 시간 되면 영화 보러 갈래?", json.dumps({"summary": "개인 메일", "tasks": []}), task["source_id"]))
+        self.store.backfill_auto_tasks(self.cfg)
+        self.assertEqual(self.store.list_tasks()["tasks"], [])
+        hidden = self.store.list_tasks(scope="deleted")["tasks"]
+        self.assertEqual(len(hidden), 1)
+        self.assertIsNotNone(hidden[0]["deleted_at"])
+        self.assertEqual(self.store.rows("SELECT kind FROM events ORDER BY seq DESC LIMIT 1")[0]["kind"], "업무 무관 메일에서 자동 업무 제외")
+
     def test_completion_time_is_idempotent_and_reopening_preserves_history(self):
         task=self.task()
         with patch('mailbrain.core.now',return_value='2026-10-03T10:00:00+09:00'):

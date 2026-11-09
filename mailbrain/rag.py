@@ -51,25 +51,29 @@ class HistoryRAG:
         mapping = {m["id"]: g for g in groups for m in g["messages"]}
         messages = self.store.rows("SELECT * FROM messages WHERE excluded=0")
         events = self.store.rows("SELECT * FROM events ORDER BY seq")
-        stamp = hashlib.sha256(("rag-v4:" + dump([(m["id"], m["received_at"], m["summary"]) for m in messages] + [(e["seq"], e["at"]) for e in events])).encode()).hexdigest()
+        stamp = hashlib.sha256(("rag-v5:" + dump([(m["id"], m["received_at"], m["summary"], m.get("direction", "inbound"), hashlib.sha256(m["body"].encode()).hexdigest()) for m in messages] + [(e["seq"], e["at"]) for e in events])).encode()).hexdigest()
         with self.store.connect() as db:
             db.executescript("""
-                CREATE TABLE IF NOT EXISTS rag_chunks(id INTEGER PRIMARY KEY, message_id TEXT, event_seq INTEGER, topic_id TEXT, day TEXT, title TEXT, content TEXT, source_time TEXT);
+                CREATE TABLE IF NOT EXISTS rag_chunks(id INTEGER PRIMARY KEY, message_id TEXT, event_seq INTEGER, topic_id TEXT, day TEXT, title TEXT, content TEXT, source_time TEXT, direction TEXT NOT NULL DEFAULT 'inbound');
                 CREATE VIRTUAL TABLE IF NOT EXISTS rag_fts USING fts5(terms);
             """)
+            if "direction" not in {row["name"] for row in db.execute("PRAGMA table_info(rag_chunks)")}:
+                db.execute("ALTER TABLE rag_chunks ADD COLUMN direction TEXT NOT NULL DEFAULT 'inbound'")
             current = db.execute("SELECT value FROM metadata WHERE key='rag_stamp'").fetchone()
             if current and current["value"] == stamp:
                 return groups
             db.execute("DELETE FROM rag_chunks")
             db.execute("DELETE FROM rag_fts")
-            def insert(message_id, event_seq, topic_id, day, title, content, source_time):
-                cursor = db.execute("INSERT INTO rag_chunks(message_id,event_seq,topic_id,day,title,content,source_time) VALUES(?,?,?,?,?,?,?)", (message_id,event_seq,topic_id,day,title,content,source_time))
+            def insert(message_id, event_seq, topic_id, day, title, content, source_time, direction="inbound"):
+                cursor = db.execute("INSERT INTO rag_chunks(message_id,event_seq,topic_id,day,title,content,source_time,direction) VALUES(?,?,?,?,?,?,?,?)", (message_id,event_seq,topic_id,day,title,content,source_time,direction))
                 db.execute("INSERT INTO rag_fts(rowid,terms) VALUES(?,?)", (cursor.lastrowid, tokens(title + " " + title + " " + content)))
             for mail in messages:
                 group = mapping[mail["id"]]
                 timestamp = mail["received_at"] or mail["sent_at"]
+                direction = mail.get("direction", "inbound")
+                prefix = "내가 보낸 회신 · 최종 처리 내용 후보" if direction == "outbound" else "수신 메일"
                 for part in chunks(mail["body"]):
-                    insert(mail["id"], None, group["id"], timestamp[:10], group["title"], part, timestamp)
+                    insert(mail["id"], None, group["id"], timestamp[:10], group["title"], prefix + "\n" + part, timestamp, direction)
             for event in events:
                 after = json.loads(event["after_json"])
                 before = json.loads(event["before_json"]) or {}
@@ -124,7 +128,8 @@ class HistoryRAG:
             key = (hit["message_id"], hit["event_seq"])
             if key not in unique:
                 unique[key] = hit
-        evidence = list(unique.values())[:120]
+        evidence = sorted(unique.values(), key=lambda h: (
+            h.get("direction") == "outbound", h["source_time"]), reverse=True)[:120]
         citation_ids = set()
         daily = defaultdict(list)
         for hit in evidence:
@@ -132,13 +137,19 @@ class HistoryRAG:
             citation_ids.add(citation)
             item = {"citation": citation, "message_id": hit["message_id"], "event_seq": hit["event_seq"],
                     "topic_id": hit["topic_id"], "topic": group_by_id.get(hit["topic_id"], {}).get("title", hit["title"]),
-                    "time": hit["source_time"], "kind": "업무 변경" if hit["event_seq"] is not None else "메일 수신",
+                    "time": hit["source_time"], "kind": "업무 변경" if hit["event_seq"] is not None else ("내 회신 · 해결 이력" if hit.get("direction") == "outbound" else "메일 수신"),
                     "quote": hit["content"][:900]}
             daily[hit["day"]].append(item)
         days = [{"date": day, "items": sorted(items, key=lambda x: x["time"], reverse=True)} for day, items in sorted(daily.items(), reverse=True)]
         # 추출형 모드도 답변은 검색된 근거에서만 구성합니다. 자유 추론은 하지 않습니다.
-        answer = {"summary": f"{len(daily)}개 날짜에서 {len(evidence)}건의 근거를 찾았습니다." if evidence else "현재 수집된 자료에서 근거를 찾지 못했습니다.",
-                  "facts": [{"text": h["content"][:220], "citations": ["E"+str(h["event_seq"]) if h["event_seq"] is not None else "M"+str(h["id"])]} for h in evidence[:6]],
+        latest_reply = next((h for h in evidence if h.get("direction") == "outbound"), None)
+        facts = [{"text": h["content"][:220], "citations": ["E"+str(h["event_seq"]) if h["event_seq"] is not None else "M"+str(h["id"])]} for h in evidence[:6]]
+        if latest_reply:
+            reply_fact = {"text": f"최신 본인 회신의 과거 처리 내용(현재 적용 전 확인 필요): {latest_reply['content'][:170]}",
+                          "citations": ["M" + str(latest_reply["id"])]}
+            facts = [reply_fact] + [fact for fact in facts if fact["citations"] != reply_fact["citations"]][:5]
+        answer = {"summary": ("최신 본인 회신을 과거 해결 사례로 제안 근거에 포함했습니다. 현재 적용 전 실제 상태와 승인 절차를 확인하세요." if latest_reply else f"{len(daily)}개 날짜에서 {len(evidence)}건의 근거를 찾았습니다.") if evidence else "현재 수집된 자료에서 근거를 찾지 못했습니다.",
+                  "facts": facts,
                   "unknowns": ["수신 메일은 업무 수행 완료의 증명이 아닙니다. 완료 여부는 승인된 업무 이력을 확인하세요."] if evidence else []}
         generation = "근거 추출형"
         if query.strip() and evidence and self.cfg["engine"] == "ollama":
@@ -152,4 +163,4 @@ class HistoryRAG:
         return {"query": query, "answer": answer, "days": days, "evidence_count": len(evidence),
                 "mode": "RAG · 한국어 부분어절 BM25 + 토픽 확장", "generation": generation,
                 "topics": [{"id":g["id"],"title":g["title"]} for g in groups],
-                "date_basis": "메일 수신일(기존 미확인 자료는 발송일 대체), 업무 변경일", "limit": 120}
+                "date_basis": "수신 메일은 수신일, 내 회신은 발송일, 업무 상태 변경은 변경일 기준", "limit": 120}

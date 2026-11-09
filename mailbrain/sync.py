@@ -148,11 +148,13 @@ class SyncManager:
                 def metadata_update(identifier, received_at):
                     with self.store.connect() as db:
                         db.execute("UPDATE messages SET received_at=? WHERE id=? AND received_at IS NULL", (received_at, identifier))
-                for message in outlook(self.cfg, start, end, known, progress, metadata_update):
-                    batch.append(message)
-                    if len(batch) >= 20:
-                        ingest(batch)
-                        batch = []
+                for folder_type in (6, 5):
+                    for message in outlook(self.cfg, start, end, known, progress, metadata_update,
+                                           folder_type=folder_type):
+                        batch.append(message)
+                        if len(batch) >= 20:
+                            ingest(batch)
+                            batch = []
                 if batch:
                     ingest(batch)
                 self.update(phase="일부 메일 분석 실패" if counts["failed"] else "수집 완료", last_finished=now())

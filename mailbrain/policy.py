@@ -43,8 +43,36 @@ def direct_recipient(message, cfg):
     return bool(mine & parsed(message.get("to", "")))
 
 
+def work_related(message):
+    """Keep explicit action items or mail with clear business context in My Work."""
+    analysis = message.get("analysis") or {}
+    if isinstance(analysis, str):
+        try:
+            analysis = json.loads(analysis)
+        except (TypeError, json.JSONDecodeError):
+            analysis = {}
+    tasks = analysis.get("tasks", []) if isinstance(analysis, dict) else []
+    if any(isinstance(item, dict)
+           and item.get("action") in {"CREATE", "UPDATE", "CANCEL", "COMPLETE"}
+           and isinstance(item.get("title"), str) and item["title"].strip()
+           and isinstance(item.get("evidence_quote"), str) and item["evidence_quote"].strip()
+           for item in tasks):
+        return True
+    text = f"{message.get('subject', '')} {message.get('body', '')}".casefold()
+    business_signals = (
+        "업무", "프로젝트", "sap", "erp", "리스", "계약", "스케줄", "스케쥴", "일정 조정",
+        "회의", "거래처", "전자결재", "승인 요청", "서버", "시스템", "개발", "장애", "오류",
+        "견적", "발주", "전표", "정산", "계정 권한", "유지보수", "배포", "검토 요청",
+        "자료 요청", "변경 요청", "조치 요청", "업무 요청", "business", "project", "invoice",
+        "contract", "incident", "deployment", "maintenance", "purchase order",
+    )
+    return any(signal in text for signal in business_signals)
+
+
 def task_recipient(message, cfg):
-    """To 메일은 업무 후보로 올리고, CC 메일은 실제 업무 요청이 추출된 경우만 올립니다."""
+    """To 메일은 업무 관련성이 있어야 하며, CC는 실행 요청 근거까지 있어야 합니다."""
+    if not work_related(message):
+        return False
     if direct_recipient(message, cfg):
         return True
 

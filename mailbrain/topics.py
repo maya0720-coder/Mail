@@ -108,6 +108,7 @@ class Topics:
             for mail in group:
                 children.append({"id": mail["id"], "subject": mail["subject"], "sender": mail["sender"],
                                  "sent_at": mail["sent_at"], "received_at": mail["received_at"] or mail["sent_at"],
+                                 "direction": mail.get("direction", "inbound"),
                                  "date_basis": "수신일" if mail["received_at"] else "발송일 대체",
                                  "summary": brief(mail["body"]), "proposals": by_mail.get(mail["id"], [])})
             group_text = " ".join(m["subject"] + " " + brief(m["body"]) for m in group)

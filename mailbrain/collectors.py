@@ -107,10 +107,9 @@ def collection_window(start=None, end=None, clock=None):
     return lower, upper
 
 
-def outlook_filter(lower, upper):
+def outlook_filter(lower, upper, field='"urn:schemas:httpmail:datereceived"'):
     # DASL 날짜는 UTC. Outlook의 지역별 날짜 문자열 해석 차이를 피합니다.
     stamp = lambda value: value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    field = '"urn:schemas:httpmail:datereceived"'
     return f"@SQL={field} >= '{stamp(lower)}' AND {field} < '{stamp(upper)}'"
 
 
@@ -151,8 +150,8 @@ def outlook_probe(cfg):
         pythoncom.CoUninitialize()
 
 
-def outlook(cfg, start=None, end=None, known_ids=None, progress=None, metadata_update=None):
-    """기간 필터 후 본인 받은편지함만 읽습니다. 기존 ID의 본문은 재조회하지 않습니다."""
+def outlook(cfg, start=None, end=None, known_ids=None, progress=None, metadata_update=None, folder_type=6):
+    """본인 받은편지함(6) 또는 보낸 편지함(5)을 기간별로 수집합니다."""
     lower, upper = collection_window(start, end)
     try:
         import pythoncom
@@ -162,9 +161,13 @@ def outlook(cfg, start=None, end=None, known_ids=None, progress=None, metadata_u
     try:
         namespace = _outlook_namespace()
         account = _outlook_account(namespace, cfg)
-        folder = account.DeliveryStore.GetDefaultFolder(6)
-        items = folder.Items.Restrict(outlook_filter(lower, upper))
-        items.Sort("[ReceivedTime]", False)
+        sent_folder = folder_type == 5
+        if folder_type not in (5, 6):
+            raise ValueError("지원하지 않는 Outlook 메일함입니다.")
+        folder = account.DeliveryStore.GetDefaultFolder(folder_type)
+        date_field = '"urn:schemas:httpmail:date"' if sent_folder else '"urn:schemas:httpmail:datereceived"'
+        items = folder.Items.Restrict(outlook_filter(lower, upper, date_field))
+        items.Sort("[SentOn]" if sent_folder else "[ReceivedTime]", False)
         total = items.Count
         known = known_ids or set()
 
@@ -193,16 +196,17 @@ def outlook(cfg, start=None, end=None, known_ids=None, progress=None, metadata_u
                 identifier = item.EntryID
             identifier = str(identifier or item.EntryID)
             # Outlook에서 범위 필터 후에도 경계 시각을 코드에서 한 번 더 확인합니다.
-            received = item.ReceivedTime
-            if received.tzinfo is None:
-                received = received.astimezone()
-            if not lower <= received < upper:
+            received = item.ReceivedTime if not sent_folder else None
+            timestamp = item.SentOn if sent_folder else received
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.astimezone()
+            if not lower <= timestamp < upper:
                 continue
             if identifier in known:
-                if metadata_update:
+                if metadata_update and not sent_folder:
                     metadata_update(identifier, received.astimezone(KST).isoformat())
                 continue
-            sender = smtp(item.Sender)
+            sender = str(account.SmtpAddress) if sent_folder else smtp(item.Sender)
             if sender_excluded(sender, cfg):
                 continue
             to, cc = [], []
@@ -211,15 +215,14 @@ def outlook(cfg, start=None, end=None, known_ids=None, progress=None, metadata_u
                 address = smtp(recipient.AddressEntry)
                 (to if recipient.Type == 1 else cc).append(address)
             mine = addresses(cfg["user_email"]) | addresses(cfg.get("aliases", []))
-            if not (addresses(to) | addresses(cc)) & mine:
+            if not sent_folder and not (addresses(to) | addresses(cc)) & mine:
                 continue
-            timestamp = item.SentOn
-            if timestamp.tzinfo is None:
-                timestamp = timestamp.astimezone()
             message = {"id": identifier, "thread_id": str(item.ConversationID or identifier),
                        "subject": str(item.Subject or "(제목 없음)"), "sender": sender,
-                       "to": ",".join(to), "cc": ",".join(cc), "sent_at": timestamp.isoformat(), "received_at": received.astimezone(KST).isoformat(),
-                       "body": _outlook_body(item), "source": "outlook-classic"}
+                       "to": ",".join(to), "cc": ",".join(cc), "sent_at": timestamp.isoformat(),
+                       "received_at": None if sent_folder else received.astimezone(KST).isoformat(),
+                       "direction": "outbound" if sent_folder else "inbound",
+                       "body": _outlook_body(item), "source": "outlook-classic-sent" if sent_folder else "outlook-classic"}
             yield normalize_message(message, cfg)
     finally:
         # COM 참조는 생성한 스레드에서만 사용하고 해제합니다.

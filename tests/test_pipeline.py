@@ -41,6 +41,29 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.store.state()["tasks"][0]["auto_generated"], 1)
         self.assertEqual(len(self.store.state()["proposals"]), 1)
 
+    def test_non_business_direct_mail_is_saved_but_not_added_to_my_work(self):
+        unrelated = {**self.mails[0], "id": "personal-note", "thread_id": "personal-note",
+                     "subject": "주말 영화 추천", "body": "이번 주말 시간 되면 같이 보러 갈래?"}
+        self.pipeline.ingest([unrelated])
+        self.assertEqual(self.store.state()["message_count"], 1)
+        self.assertEqual(self.store.state()["tasks"], [])
+        self.assertEqual(self.store.state()["proposals"], [])
+
+    def test_outgoing_solution_reply_is_saved_for_rag_without_creating_work(self):
+        incoming = {**self.mails[0], "thread_id": "reply-thread"}
+        reply = {**self.mails[1], "id": "my-final-reply", "thread_id": "reply-thread",
+                 "sender": self.cfg["user_email"], "to": "lead@example.com", "cc": "",
+                 "direction": "outbound", "body": "리스 스케줄 조정 완료. SE16에서 대상 데이터를 확인하고 승인된 절차로 반영했습니다."}
+        self.pipeline.ingest([incoming, reply])
+        saved = self.store.rows("SELECT direction,body FROM messages WHERE id='my-final-reply'")[0]
+        self.assertEqual(saved["direction"], "outbound")
+        self.assertIn("SE16", saved["body"])
+        self.assertFalse(any(task["source_id"] == reply["id"] for task in self.store.state()["tasks"]))
+        self.assertFalse(any(item["source_id"] == reply["id"] for item in self.store.state()["proposals"]))
+        result = self.pipeline.history("SE16 리스 스케줄 조정")
+        citations = [item for day in result["days"] for item in day["items"]]
+        self.assertTrue(any(item["message_id"] == reply["id"] and item["kind"] == "내 회신 · 해결 이력" for item in citations))
+
     def test_approval_records_event_atomically(self):
         self.ingest_one()
         prior_events = len(self.store.state()["events"])

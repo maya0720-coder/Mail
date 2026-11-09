@@ -78,6 +78,19 @@ class TopicsHistoryTests(unittest.TestCase):
         self.assertIn("스레드",self.pipeline.search("협력사")["mode"])
         self.assertEqual(len(self.store.state()["tasks"]), 1)
 
+    def test_sent_solution_is_history_evidence_not_a_received_report_item(self):
+        today = datetime.now(KST).date().isoformat()
+        incoming = {**self.mails[0], "thread_id": "report-reply", "received_at": today + "T09:00:00+09:00"}
+        reply = {**self.mails[1], "id": "report-sent-reply", "thread_id": "report-reply",
+                 "sender": self.cfg["user_email"], "to": "lead@example.com", "direction": "outbound",
+                 "sent_at": today + "T10:00:00+09:00", "received_at": None,
+                 "body": "요청한 자료 검토를 완료하고 결과를 회신했습니다."}
+        self.pipeline.ingest([incoming, reply])
+        report = self.pipeline.report(today, today)
+        source_ids = [mail_id for row in report["document"]["rows"] for item in row["this_week"] for mail_id in item["source_ids"]]
+        self.assertIn(incoming["id"], source_ids)
+        self.assertNotIn(reply["id"], source_ids)
+
     def test_rag_synonym_copy_retrieves_korean(self):
         self.pipeline.ingest([{**self.mails[0],"subject":"QA 서버 시스템 카피 문의","body":"카피 일정을 다음 주로 변경합니다."}])
         result = self.pipeline.history("시스템 복제")

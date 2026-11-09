@@ -132,6 +132,8 @@ class Store:
             message_columns = {row["name"] for row in db.execute("PRAGMA table_info(messages)")}
             if "received_at" not in message_columns:
                 db.execute("ALTER TABLE messages ADD COLUMN received_at TEXT")
+            if "direction" not in message_columns:
+                db.execute("ALTER TABLE messages ADD COLUMN direction TEXT NOT NULL DEFAULT 'inbound'")
             if "excluded" not in message_columns:
                 db.execute("ALTER TABLE messages ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0")
             task_columns = {row["name"] for row in db.execute("PRAGMA table_info(tasks)")}
@@ -375,6 +377,8 @@ class Store:
             return False
         direct_messages = []
         for mail in messages:
+            if mail.get("direction") == "outbound":
+                continue
             try:
                 recipients = json.loads(mail.get("recipients") or "{}")
             except (TypeError, json.JSONDecodeError):
@@ -389,8 +393,19 @@ class Store:
         current = [dict(row) for row in db.execute(
             "SELECT t.* FROM tasks t JOIN messages m ON m.id=t.source_id "
             "WHERE m.thread_id=? AND t.auto_generated=1 AND t.deleted_at IS NULL ORDER BY t.created_at,t.id", (thread_id,))]
-        if not current and not direct_messages:
-            return False
+        if not direct_messages:
+            stamp = now()
+            archived = []
+            for task in current:
+                if task["manual"]:
+                    continue
+                before = dict(task)
+                db.execute("UPDATE tasks SET deleted_at=?,updated_at=? WHERE id=?", (stamp, stamp, task["id"]))
+                after = {**task, "deleted_at": stamp, "updated_at": stamp}
+                db.execute("INSERT INTO events(task_id,kind,before_json,after_json,source_id,actor,at) VALUES(?,?,?,?,?,?,?)",
+                           (task["id"], "업무 무관 메일에서 자동 업무 제외", dump(before), dump(after), task["source_id"], "자동 분류", stamp))
+                archived.append(task["id"])
+            return bool(archived)
         if not current:
             mail, candidate = direct_messages[-1]
             candidate["id"] = mail["id"]
@@ -516,9 +531,14 @@ def normalize_message(message, cfg):
     if not all(isinstance(message[k], str) for k in required):
         raise ValueError("메일 필드는 문자열이어야 합니다.")
     mine = addresses(cfg["user_email"]) | addresses(cfg.get("aliases", []))
+    direction = message.get("direction") or ("outbound" if addresses(message["sender"]) & mine else "inbound")
+    if direction not in {"inbound", "outbound"}:
+        raise ValueError("메일 방향 정보가 올바르지 않습니다.")
     recipients = addresses(message["to"]) | addresses(message.get("cc", ""))
-    if not mine & recipients:
+    if direction == "inbound" and not mine & recipients:
         raise ValueError("본인이 수신자/참조자인 메일만 수집합니다.")
+    if direction == "outbound" and not mine & addresses(message["sender"]):
+        raise ValueError("본인이 보낸 회신만 수집합니다.")
     sent = datetime.fromisoformat(message["sent_at"])
     if sent.tzinfo is None:
         raise ValueError("메일 날짜에 시간대가 필요합니다.")
@@ -532,7 +552,7 @@ def normalize_message(message, cfg):
         if parsed.tzinfo is None:
             raise ValueError("수신 시각에 시간대가 필요합니다.")
         received = parsed.astimezone(KST).isoformat()
-    return {**message, "received_at": received, "sent_at": sent.astimezone(KST).isoformat(), "thread_id": message.get("thread_id") or message["id"]}
+    return {**message, "direction": direction, "received_at": received, "sent_at": sent.astimezone(KST).isoformat(), "thread_id": message.get("thread_id") or message["id"]}
 
 
 def rule_analysis(message, cfg):
@@ -622,29 +642,34 @@ class Pipeline:
                         if not recovering_body:
                             counts["duplicates"] += 1
                             continue
-                    analysis = engine.role("01_analyze", {"user_email": self.cfg["user_email"], "message": message})
+                    if message["direction"] == "outbound":
+                        analysis = {"summary": "내가 보낸 회신입니다. 해결 내용은 RAG 업무 히스토리 근거로 저장합니다.", "tasks": []}
+                    else:
+                        analysis = engine.role("01_analyze", {"user_email": self.cfg["user_email"], "message": message})
                     if analysis is None:
                         analysis = rule_analysis(message, self.cfg)
                     validate_analysis(analysis, message)
-                    verification = engine.role("03_verify", {"message": message, "analysis": analysis})
+                    verification = (engine.role("03_verify", {"message": message, "analysis": analysis})
+                                    if message["direction"] == "inbound" else None)
                     if verification is not None and verification.get("verdict") != "PASS":
                         raise ValueError("AI 검증에서 확인 필요 판정입니다. 원문을 검토 후 다시 수집하세요.")
                     related = self.store.rows("SELECT DISTINCT t.* FROM tasks t JOIN messages m ON t.source_id=m.id WHERE m.thread_id=? AND t.deleted_at IS NULL", (message["thread_id"],))
                     # 연결 역할의 결과도 제안입니다. 대상 ID는 코드에서 범위를 검증합니다.
-                    links = engine.role("02_reconcile", {"analysis": analysis, "existing_tasks": related})
+                    links = (engine.role("02_reconcile", {"analysis": analysis, "existing_tasks": related})
+                             if message["direction"] == "inbound" else None)
                     link_list = links.get("links", []) if isinstance(links, dict) else []
                     with self.store.connect() as db:
                         if recovering_body:
-                            db.execute("UPDATE messages SET thread_id=?,subject=?,sender=?,recipients=?,sent_at=?,body=?,summary=?,source=?,analysis=?,received_at=COALESCE(received_at,?) WHERE id=?", (
+                            db.execute("UPDATE messages SET thread_id=?,subject=?,sender=?,recipients=?,sent_at=?,body=?,summary=?,source=?,analysis=?,received_at=COALESCE(received_at,?),direction=? WHERE id=?", (
                                 message["thread_id"], message["subject"], message["sender"],
                                 dump({"to": message["to"], "cc": message.get("cc", "")}), message["sent_at"],
-                                message["body"], analysis["summary"], message.get("source", "import"), dump(analysis), message.get("received_at"), message["id"]))
+                                message["body"], analysis["summary"], message.get("source", "import"), dump(analysis), message.get("received_at"), message["direction"], message["id"]))
                         else:
-                            db.execute("INSERT INTO messages(id,thread_id,subject,sender,recipients,sent_at,body,summary,source,imported_at,analysis,received_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (
+                            db.execute("INSERT INTO messages(id,thread_id,subject,sender,recipients,sent_at,body,summary,source,imported_at,analysis,received_at,direction) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (
                                 message["id"], message["thread_id"], message["subject"], message["sender"],
                                 dump({"to": message["to"], "cc": message.get("cc", "")}), message["sent_at"],
-                                message["body"], analysis["summary"], message.get("source", "import"), now(), dump(analysis), message.get("received_at")))
-                        for index, item in enumerate(analysis["tasks"]):
+                                message["body"], analysis["summary"], message.get("source", "import"), now(), dump(analysis), message.get("received_at"), message["direction"]))
+                        for index, item in enumerate(analysis["tasks"] if message["direction"] == "inbound" else []):
                             matches = [t for t in related if t["title"] == item["title"]]
                             target = matches[0]["id"] if len(matches) == 1 else None
                             if index < len(link_list) and isinstance(link_list[index], dict):
@@ -659,9 +684,10 @@ class Pipeline:
                                 reason = "연결할 기존 업무를 선택하세요."
                             db.execute("INSERT INTO proposals(id,source_id,action,target_id,payload,reason) VALUES(?,?,?,?,?,?)",
                                        (uuid.uuid4().hex[:12], message["id"], action, target, dump(item), reason))
-                        self.store.refresh_auto_thread(db, message["thread_id"], self.cfg,
-                                                       mark_unread=task_recipient({**message, "cc": message.get("cc", ""),
-                                                                                  "analysis": analysis}, self.cfg))
+                        if message["direction"] == "inbound":
+                            self.store.refresh_auto_thread(db, message["thread_id"], self.cfg,
+                                                           mark_unread=task_recipient({**message, "cc": message.get("cc", ""),
+                                                                                      "analysis": analysis}, self.cfg))
                     counts["imported"] += 1
                 except (ValueError, TypeError, KeyError) as exc:
                     counts["failed"] += 1

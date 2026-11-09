@@ -30,7 +30,8 @@ def build_document(store, cfg, start, end, snapshot, changes, completed_count):
     for topic in topics:
         for message in topic["messages"]:
             mail_topics[message["id"]] = topic
-        messages = [m for m in topic["messages"] if start <= m["received_at"][:10] <= end and not is_auth_notification(m["subject"])]
+        messages = [m for m in topic["messages"] if m.get("direction", "inbound") == "inbound"
+                    and start <= m["received_at"][:10] <= end and not is_auth_notification(m["subject"])]
         if not messages:
             continue
         newest = messages[0]

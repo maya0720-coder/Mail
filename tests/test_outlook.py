@@ -143,6 +143,21 @@ class OutlookTests(unittest.TestCase):
         com.CoInitialize.assert_called_once()
         com.CoUninitialize.assert_called_once()
 
+    def test_sent_folder_collects_my_replies_as_outbound(self):
+        lower, upper = collection_window(clock=self.clock)
+        mail = Mail("sent-one", upper - timedelta(days=1), "client@example.com")
+        folder = types.SimpleNamespace(Items=Collection([mail]))
+        store = types.SimpleNamespace(GetDefaultFolder=lambda number: folder)
+        ns = types.SimpleNamespace(Accounts=Collection([types.SimpleNamespace(SmtpAddress="me@example.com", DeliveryStore=store)]))
+        com = types.SimpleNamespace(CoInitialize=MagicMock(), CoUninitialize=MagicMock())
+        with patch.dict("sys.modules", {"pythoncom": com}), patch("mailbrain.collectors._outlook_namespace", return_value=ns), patch("mailbrain.collectors.collection_window", return_value=(lower, upper)):
+            result = list(outlook(self.cfg, folder_type=5))
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["direction"], "outbound")
+        self.assertEqual(result[0]["sender"], "me@example.com")
+        self.assertIsNone(result[0]["received_at"])
+        self.assertIn("urn:schemas:httpmail:date", folder.Items.filters[0])
+
     def test_ad_identity_uses_requested_domain(self):
         with patch.dict("os.environ", {"USERNAME": "maya0720", "USERDOMAIN": "GFZ"}):
             cfg = load_config(ROOT / "config.example.json")
