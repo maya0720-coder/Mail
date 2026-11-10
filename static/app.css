@@ -49,3 +49,67 @@ details.task-kind[open]>summary .topic-chevron,details.task-stage[open]>summary 
 .active-filter{display:inline-flex;align-items:center;gap:6px;margin-left:8px;padding:2px 8px;border-radius:4px;background:#e8efff;color:var(--blue);font-size:11px}
 .link-button{border:0;background:none;padding:0;color:var(--blue);font-size:11px;text-decoration:underline;cursor:pointer}
 @media(max-width:760px){.summary-strip>button{padding-left:12px}.summary-strip>button>span:first-child{font-size:10px}.bulk-bar button{flex:1}}
+/* 3차 개선: 업무 장부 톤으로 정리. 장식(파란 알약 버튼·카드 그림자·큰 모서리)을 줄이고 표·목록 중심으로 맞춥니다.
+   색: 바탕 #f1f2ef, 면 #ffffff, 글자 #1d2730, 보조 #66717b, 구분선 #d8dcd6, 강조 #2d5b61(짙은 청록) 하나만 씁니다. */
+:root{--navy:#1d2730;--ink:#1d2730;--muted:#66717b;--blue:#2d5b61;--line:#d8dcd6;--canvas:#f1f2ef;--green:#2f6b3f;--accent-soft:#e3ecec;font-family:"Pretendard","Malgun Gothic","Segoe UI",sans-serif}
+body{background:var(--canvas);letter-spacing:-.1px}
+button{border-radius:3px;font-weight:500;border-color:var(--line)}
+button:hover{background:#f6f7f5;border-color:#b9c0b8}
+button.primary{background:var(--blue);border-color:var(--blue)}
+button.primary:hover{background:#244a4f}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+input,select,textarea{border-radius:3px}
+.sidebar{background:#e7e9e5;color:var(--ink);border-right:1px solid var(--line)}
+.brand{color:var(--ink);font-size:18px;letter-spacing:-.4px}
+.brand small{color:var(--muted)}
+.brand-icon{background:none;color:var(--blue);border:1.5px solid var(--blue);border-radius:3px;width:32px;height:32px}
+.workspace{border-top:1px solid var(--line)}
+.workspace small{color:var(--muted)}
+.avatar{background:#d5dad3;color:var(--ink);border-radius:3px}
+.sidebar nav{gap:1px}
+.sidebar nav button{color:#3d4852;border-radius:0;border-left:3px solid transparent;padding:9px 12px}
+.sidebar nav button:hover{color:var(--ink);background:#dfe2dd}
+.sidebar nav button.active{color:var(--ink);background:#fff;border-left-color:var(--blue);font-weight:600}
+.nav-count{background:transparent;color:var(--muted);font-weight:600}
+.sidebar nav button.active .nav-count{color:var(--blue)}
+.nav-divider{background:var(--line)}
+.sidebar-bottom p,.sidebar-link{color:var(--muted)}
+.panel{border-radius:3px;box-shadow:none}
+h1{letter-spacing:-.6px}
+.summary-strip{margin:18px 0 22px;padding-bottom:18px}
+.summary-strip b{font-size:23px;font-weight:600;color:var(--ink)}
+.summary-strip>button:nth-child(2) b{color:var(--blue)}
+.summary-note{color:var(--muted)}
+.section-heading h2 span{background:var(--accent-soft);color:var(--blue);border-radius:2px}
+.topic-card{border-radius:0;margin:0}
+.topic-card+.topic-card{margin-top:-1px}
+.topic-card>summary{padding:14px 18px}
+.topic-card[open]{position:relative;z-index:1;border-color:#b9c0b8}
+.bulk-bar{border-radius:3px;background:#fff}
+.task-item>summary:hover,.task-item[open]>summary{background:#f6f7f5}
+.task-item>summary{background:#fff}
+.task-group-title{color:var(--ink);border-bottom:1px solid var(--ink)}
+.task-stage-heading{color:#3d4852;font-weight:600}
+.active-filter{background:var(--accent-soft);color:var(--blue);border-radius:2px}
+.link-button{color:var(--blue)}
+.badge{border-radius:2px}
+.weekly-table th,.weekly-table td{border-color:#c9cec7}
+.weekly-table thead th{background:#e9ebe7;color:var(--ink);font-size:13px}
+.weekly-table tbody th{background:#f7f8f6}
+.weekly-table th:first-child{width:13%}
+.weekly-table th:nth-child(2),.weekly-table th:nth-child(3){width:36%}
+.weekly-table th:last-child{width:15%}
+.report-item{border-bottom-color:#e5e8e3}
+.report-points li{overflow-wrap:anywhere;white-space:normal}
+dialog{border-radius:4px}
+.task-check{width:16px;height:16px;margin:0 2px 0 0;flex-shrink:0;cursor:pointer;accent-color:var(--blue)}
+.topic-check{accent-color:var(--blue)}
+.task-stage-heading .task-check{margin-right:4px}
+.bulk-bar>span{margin-right:auto}
+input[type=checkbox]{accent-color:var(--blue)}
+.task-state{color:#3d4852;background:#eceeea;border-radius:2px}
+.task-state.done{color:var(--green);background:#e6efe7}
+.topic-meta>span{color:var(--muted)}
+.task-group-title span,.task-stage-heading span{color:var(--blue);background:none}
+#notice{border-radius:3px}
+#menu-toast{border-radius:3px;border-left-color:var(--blue)}

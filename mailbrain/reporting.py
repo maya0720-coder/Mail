@@ -2,10 +2,9 @@
 from datetime import date, timedelta
 from html import escape
 from pathlib import Path
-from urllib.parse import quote
 
 from .topics import Topics, CATEGORIES, category
-from .policy import personal_notice
+from .policy import personal_notice, mailbox
 import re
 import uuid
 
@@ -128,15 +127,17 @@ def report_sentences(text, subjects=()):
             part = re.sub(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", "", part or "")
             # 규칙 분석용 '업무: 이름;' 표기는 이름 대신 뒤의 실제 요청 문장만 씁니다.
             part = re.sub(r"^\s*(?:(?:[^\s,]{1,15}\s+){0,2}[^\s,]{1,15}님\s*[,，]?\s*)?(?:업무\s*:\s*[^;]+;\s*)?", "", part.strip())
-            part = re.sub(r"^\s*[-·*]\s*", "", part).strip(" -•·:;")
+            part = REPORT_PREFIX.sub("", SUBJECT_TAIL.sub("", part))
+            part = re.sub(r"^\s*[-·*]\s*", "", part).strip(" -•·:;…")
             if not part or GREETING.search(part) or SELF_INTRO.search(part) or key(part) in known:
                 continue
             pieces.append(part)
     return pieces
 
 
-def summary_points(text, limit=3, width=60, subjects=()):
-    """서술형 메일 요약을 보고서용 짧은 명사형 요약 항목으로 바꿉니다(메일 제목·인사말 제외)."""
+def summary_points(text, limit=3, width=None, subjects=()):
+    """서술형 메일 요약을 보고서용 명사형 요약 항목으로 바꿉니다(메일 제목·인사말 제외).
+    주간 보고는 문장을 '…'로 자르지 않고 전문을 씁니다. width를 주면 그 길이에서 자릅니다."""
     pieces = report_sentences(text, subjects)
     important = [p for p in pieces if re.search(r"일정|변경|요청|완료|검토|오류|테스트|진행|예정|확인|지원|배포|처리|결재|부탁|주세요|바랍니다|필요|update|resolve", p, re.I)]
     points = []
@@ -144,12 +145,37 @@ def summary_points(text, limit=3, width=60, subjects=()):
         piece = nominal(piece)
         if not piece:
             continue
-        short = piece if len(piece) <= width else piece[:width - 1].rstrip() + "…"
+        short = piece if not width or len(piece) <= width else piece[:width - 1].rstrip() + "…"
         if short not in points:
             points.append(short)
         if len(points) >= limit:
             break
     return points or ["세부 내용은 근거 메일 확인"]
+
+
+# 보고서 제목·내용에서 빼는 회신/전달 접두어와 [외부메일]·[골프존] 같은 말머리
+REPORT_PREFIX = re.compile(r"^\s*(?:(?:re|fw|fwd|회신|전달|답장)\s*(?:\[\d+\])?\s*[:：]\s*|\[[^\]]{1,30}\]\s*|【[^】]{1,30}】\s*)+", re.I)
+SUBJECT_TAIL = re.compile(r"\s*[—–-]{1,2}\s*(?:subject|제목)\s*[:：].*$|\s+(?:subject|제목)\s*[:：].*$", re.I)
+SAP_NOTE_SENDERS = {"notification-service@sap.com"}
+SAP_NOTE_NUMBER = re.compile(r"(?:SAP\s*)?(?:Security\s*)?Notes?\s*(?:#|No\.?|번호|number)?\s*[:：]?\s*(\d{6,8})\b", re.I)
+
+
+def report_title(text):
+    """메일 제목을 보고서용 업무명으로 정리합니다.
+    예: 'RE: [외부메일]Re: [골프존]시스템 카피 일정 확인 요청 — Subject: …' → '시스템 카피 일정 확인'"""
+    value = SUBJECT_TAIL.sub("", re.sub(r"\s+", " ", str(text or "")))
+    value = REPORT_PREFIX.sub("", value).strip()
+    value = re.sub(r"\s*(?:요청(?:의\s*건|\s+건|드립니다)?|문의(?:의\s*건|\s+건|드립니다)?|협조\s*요청|의\s*건|\s건)$", "", value)
+    return value.strip(" -:：—–…") or "(업무 제목 없음)"
+
+
+def sap_note_numbers(mails):
+    numbers = set()
+    for mail in mails:
+        text = f"{mail.get('subject') or ''}\n{mail.get('body') or ''}"
+        found = SAP_NOTE_NUMBER.findall(text) or re.findall(r"(?<!\d)(\d{6,8})(?!\d)", mail.get("subject") or "")
+        numbers.update(found)
+    return sorted(numbers, key=int)
 
 
 def new_item(title, points, start, end, source_ids, task_ids, done=False):
@@ -166,6 +192,7 @@ def build_document(store, cfg, start, end, snapshot, changes, completed_count):
     end_date = date.fromisoformat(end)
     next_start, next_end = (end_date + timedelta(days=1)).isoformat(), (end_date + timedelta(days=7)).isoformat()
     changed_ids = {event["task_id"] for event in changes}
+    sap_tasks = []
     topic_limit = max(1, min(30, int(cfg.get("report_topics_per_category", 8))))
     for task in sorted(snapshot.values(), key=lambda t: t.get("updated_at") or "", reverse=True):
         task = dict(task)
@@ -186,7 +213,11 @@ def build_document(store, cfg, start, end, snapshot, changes, completed_count):
             continue
         done = stage == "처리완료"
         source_ids = [m["id"] for m in topic["messages"] if m.get("direction", "inbound") == "inbound"][:5] if topic else [task.get("source_id")]
-        title = task_title(task.get("title") or "(업무 제목 없음)", task.get("summary") or "")
+        # SAP Notes 알림 메일은 건별 항목 대신 'SAP Notes 검토' 한 항목으로 모읍니다.
+        if topic and any(mailbox(m.get("sender")) & SAP_NOTE_SENDERS for m in topic["messages"]):
+            sap_tasks.append((task, topic, done, source_ids))
+            continue
+        title = report_title(task.get("title") or "(업무 제목 없음)")
         subjects = [task.get("title")] + [m.get("subject") for m in (topic or {}).get("messages", [])]
         points = summary_points(task.get("summary") or (topic or {}).get("latest_summary") or task.get("title"), subjects=subjects)
         period_end = (task.get("completed_at") or "")[:10] if done else task.get("due_date")
@@ -201,6 +232,20 @@ def build_document(store, cfg, start, end, snapshot, changes, completed_count):
             row["next_week"].append(new_item(title, [plan] + ([f"기한 {due}"] if due else []), next_start,
                                              due if due and next_start <= due <= next_end else next_end,
                                              source_ids, [task["id"]]))
+    if sap_tasks:
+        ids = [m["id"] for _, topic, _, _ in sap_tasks for m in topic["messages"]]
+        mails = store.rows("SELECT subject,body FROM messages WHERE id IN (" + ",".join("?" * len(ids)) + ")", ids)
+        numbers = sap_note_numbers(mails)
+        # 내용에는 Notes 번호만 씁니다. 번호가 많으면 10개씩 줄을 나눕니다.
+        points = [", ".join(numbers[i:i + 10]) for i in range(0, len(numbers), 10)] or ["Notes 번호 확인 필요"]
+        starts = [t.get("created_at")[:10] for t, _, _, _ in sap_tasks if t.get("created_at")]
+        all_done = all(done for _, _, done, _ in sap_tasks)
+        ends = [t.get("completed_at")[:10] for t, _, _, _ in sap_tasks if t.get("completed_at")]
+        row = rows[CATEGORIES[2]]
+        row["this_week"].insert(0, new_item("SAP Notes 검토", points, min(starts) if starts else None,
+                                            max(ends) if all_done and ends else None,
+                                            list(dict.fromkeys(s for _, _, _, sources in sap_tasks for s in sources)),
+                                            [t["id"] for t, _, _, _ in sap_tasks], all_done))
     for row in rows.values():
         row["omitted"] = len(row["this_week"][topic_limit:])
         row["this_week"] = row["this_week"][:topic_limit]
@@ -225,8 +270,8 @@ def markdown(document):
     for row in document["rows"]:
         def items(values):
             return "<br>".join((f"**{v['title']}** ({period_text(v)})<br>" + "<br>".join("- " + p for p in v["points"])).replace("|", "\\|").replace("\n", " ") for v in values) or "해당 없음"
-        refs = list(dict.fromkeys(s for item in row["this_week"] + row["next_week"] for s in item["source_ids"]))
-        lines.append("| " + " | ".join([row["category"], items(row["this_week"]), items(row["next_week"]), "<br>".join(row["notes"] + refs)]) + " |")
+        # 비고에는 원문 링크를 넣지 않습니다(근거 메일 ID는 문서 데이터에만 보관).
+        lines.append("| " + " | ".join([row["category"], items(row["this_week"]), items(row["next_week"]), "<br>".join(row["notes"])]) + " |")
     if document.get("narrative"):
         lines += ["", "## AI 보고 해설 — 확정 전 검토", document["narrative"]]
     return "\n".join(lines) + "\n"
@@ -269,13 +314,7 @@ def write_pdf(document, output):
         for index in range(count):
             current = row["this_week"][index:index+1]
             following = row["next_week"][index:index+1]
-            refs = list(dict.fromkeys(s for item in current + following for s in item["source_ids"]))
             notes = [para(note) for note in row["notes"]] if index == 0 else []
-            for number, source in enumerate(refs[:3], 1):
-                url = f"http://127.0.0.1:{document['port']}/#mail=" + quote(source, safe="")
-                notes.append(Paragraph(f'<link href="{escape(url, quote=True)}" color="#2166b8">관련 메일 {number}</link>', body))
-            if len(refs) > 3:
-                notes.append(para(f"동일 토픽의 근거 메일 총 {len(refs)}건. 나머지는 앱에서 펼쳐 확인", small))
             data.append([para(row["category"] if index == 0 else "(계속)"), cell(current,index+1), cell(following,index+1), notes or [para("-")]])
     table = LongTable(data, colWidths=[52, 145, 145, 161], repeatRows=1, splitByRow=1, splitInRow=0, hAlign="LEFT")
     table.setStyle(TableStyle([("GRID",(0,0),(-1,-1),.5,colors.HexColor("#bec7d4")),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#f0f2f5")),("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),5),("RIGHTPADDING",(0,0),(-1,-1),5),("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6)]))

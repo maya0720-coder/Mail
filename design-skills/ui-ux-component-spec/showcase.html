@@ -1,0 +1,965 @@
+<!DOCTYPE html>
+<html lang="ko" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>웹 UI/UX 디자인 시스템 & 명세서 뷰어</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Phosphor Icons -->
+  <script src="https://unpkg.com/@phosphor-icons/web"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#eef2ff',
+              100: '#e0e7ff',
+              500: '#6366f1',
+              600: '#4f46e5',
+              700: '#4338ca',
+            }
+          },
+          animation: {
+            'gradient-flow': 'gradientFlow 8s ease infinite',
+            'pulse-subtle': 'pulseSubtle 2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+          },
+          keyframes: {
+            gradientFlow: {
+              '0%, 100%': { backgroundPosition: '0% 50%' },
+              '50%': { backgroundPosition: '100% 50%' },
+            },
+            pulseSubtle: {
+              '0%, 100%': { opacity: '1' },
+              '50%': { opacity: '.75' },
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Pretendard:wght@300;400;500;600;700;800&display=swap');
+    body {
+      font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, Roboto, sans-serif;
+    }
+    .glassmorphism {
+      background: rgba(255, 255, 255, 0.7);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+    }
+    .dark .glassmorphism {
+      background: rgba(17, 24, 39, 0.75);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+    }
+    /* 커스텀 스크롤바 */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(156, 163, 175, 0.5);
+      border-radius: 9999px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(107, 114, 128, 0.8);
+    }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800 dark:bg-slate-950 dark:text-slate-100 transition-colors duration-300 min-h-screen relative overflow-x-hidden">
+
+  <!-- ==============================================================
+       1. GNB (Global Navigation Bar)
+       ============================================================== -->
+  <header class="sticky top-0 z-40 w-full glassmorphism border-b border-slate-200/80 dark:border-slate-800/80 transition-all">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
+      <!-- 로고 및 시스템 타이틀 -->
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center text-white shadow-md shadow-indigo-500/20">
+          <i class="ph-bold ph-layout text-xl"></i>
+        </div>
+        <div>
+          <span class="font-extrabold tracking-tight text-lg bg-gradient-to-r from-indigo-600 to-violet-500 bg-clip-text text-transparent">DesignSpec</span>
+          <span class="hidden sm:inline-block text-xs font-semibold px-2 py-0.5 ml-2 bg-indigo-100 text-indigo-700 dark:bg-indigo-950/80 dark:text-indigo-300 rounded-full">v2.4 Live</span>
+        </div>
+      </div>
+
+      <!-- 중앙 검색창 (Combobox / Search Input) -->
+      <div class="hidden md:flex items-center flex-1 max-w-md mx-4">
+        <div class="relative w-full">
+          <i class="ph ph-magnifying-glass absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 text-lg"></i>
+          <input 
+            type="text" 
+            placeholder="컴포넌트 검색 (예: Modal, Bento, CTA...)" 
+            class="w-full pl-10 pr-12 py-2 text-sm rounded-xl bg-slate-100/80 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
+            onfocus="highlightSearchGuide()"
+          />
+          <kbd class="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-mono font-medium text-slate-400 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 px-1.5 py-0.5 rounded">⌘K</kbd>
+        </div>
+      </div>
+
+      <!-- 우측 컨트롤 버튼들 -->
+      <div class="flex items-center gap-2 sm:gap-3">
+        <!-- MD 명세서 뷰어 사이드바 토글 버튼 -->
+        <button 
+          onclick="toggleDocPanel()"
+          class="flex items-center gap-2 px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold bg-indigo-50 text-indigo-600 hover:bg-indigo-100 dark:bg-indigo-950/70 dark:text-indigo-300 dark:hover:bg-indigo-900 transition-all border border-indigo-200 dark:border-indigo-800 shadow-sm"
+          title="화면 기획용 MD 명세 패널 열기"
+        >
+          <i class="ph-bold ph-code text-base"></i>
+          <span class="hidden sm:inline">MD 기획 명세서</span>
+          <span class="w-2 h-2 rounded-full bg-indigo-500 animate-ping"></span>
+        </button>
+
+        <!-- 다크모드 스위치 -->
+        <button 
+          onclick="toggleDarkMode()" 
+          class="w-9 h-9 rounded-xl flex items-center justify-center text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100 bg-slate-100 dark:bg-slate-800 transition"
+          aria-label="테마 전환"
+        >
+          <i id="themeIcon" class="ph-bold ph-moon text-lg"></i>
+        </button>
+
+        <!-- 아바타 & 알림 배지 (Profile Badge) -->
+        <div class="relative cursor-pointer group">
+          <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-emerald-400 to-teal-600 flex items-center justify-center text-white font-bold text-sm shadow-sm ring-2 ring-white dark:ring-slate-900">
+            UI
+          </div>
+          <span class="absolute -top-1 -right-1 w-3 h-3 bg-rose-500 rounded-full border-2 border-white dark:border-slate-900"></span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- 메인 레이아웃: 쇼케이스 본문 + 슬라이드 MD 뷰어 -->
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-12">
+
+    <!-- ==============================================================
+         2. Hero Section (히어로 섹션 & Scrollytelling 감성)
+         ============================================================== -->
+    <section class="relative rounded-3xl p-8 sm:p-12 overflow-hidden border border-slate-200/60 dark:border-slate-800/80 bg-gradient-to-br from-white via-indigo-50/30 to-violet-50/40 dark:from-slate-900 dark:via-slate-900 dark:to-indigo-950/40 shadow-xl">
+      <!-- 배경 블러 장식 효과 (Ambient Glow) -->
+      <div class="absolute -top-24 -right-24 w-96 h-96 bg-indigo-500/20 dark:bg-indigo-600/15 rounded-full blur-3xl pointer-events-none"></div>
+      <div class="absolute -bottom-24 -left-24 w-96 h-96 bg-violet-500/20 dark:bg-violet-600/15 rounded-full blur-3xl pointer-events-none"></div>
+
+      <div class="relative z-10 max-w-3xl space-y-5">
+        <!-- 상단 칩 (Badge) -->
+        <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-white dark:bg-slate-800 border border-indigo-100 dark:border-indigo-900/60 shadow-sm text-xs font-semibold text-indigo-600 dark:text-indigo-400">
+          <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+          2026+ 웹 UI/UX 최신 패턴 & 실시간 인터랙션 데모
+        </div>
+
+        <h1 class="text-3xl sm:text-5xl font-extrabold tracking-tight text-slate-900 dark:text-white leading-tight">
+          웹 화면 기획을 위한 <br class="hidden sm:inline"/>
+          <span class="bg-gradient-to-r from-indigo-600 via-violet-600 to-pink-500 bg-clip-text text-transparent">동적 컴포넌트 & 마크다운</span> 플레이그라운드
+        </h1>
+
+        <p class="text-slate-600 dark:text-slate-300 text-sm sm:text-base leading-relaxed">
+          실제 동작하는 각 UI 요소를 클릭해보고 인터랙션을 체감해 보세요. 각 카드 우측 상단의 
+          <strong class="text-indigo-600 dark:text-indigo-400">"MD 명세 복사"</strong> 버튼을 누르면 화면 기획서에 즉시 붙여넣을 수 있는 표준 마크다운 테이블이 클립보드에 복사됩니다.
+        </p>
+
+        <!-- CTA 버튼 그룹 (Micro-interactions) -->
+        <div class="flex flex-wrap items-center gap-3 pt-2">
+          <button 
+            onclick="triggerLiveToast('🌟 Primary CTA가 클릭되었습니다! 인터랙션 피드백이 시작됩니다.')"
+            class="group relative inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-semibold text-sm shadow-lg shadow-indigo-500/25 active:scale-95 transition-all overflow-hidden"
+          >
+            <span>Primary CTA 인터랙션</span>
+            <i class="ph-bold ph-arrow-right group-hover:translate-x-1 transition-transform"></i>
+          </button>
+
+          <button 
+            onclick="toggleDocPanel()"
+            class="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700/80 text-slate-700 dark:text-slate-200 font-semibold text-sm border border-slate-300 dark:border-slate-700 active:scale-95 transition shadow-sm"
+          >
+            <i class="ph ph-file-text text-base"></i>
+            <span>전체 기획 템플릿 열기</span>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==============================================================
+         3. Bento Grid Showcase (5대 핵심 컴포넌트 그룹)
+         ============================================================== -->
+    <section class="space-y-6">
+      <div class="flex items-center justify-between">
+        <div>
+          <h2 class="text-2xl font-bold tracking-tight text-slate-900 dark:text-white flex items-center gap-2">
+            <i class="ph-fill ph-squares-four text-indigo-500"></i>
+            Bento Grid 기반 핵심 UI 컴포넌트 랩
+          </h2>
+          <p class="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-1">상태(States), 인터랙션, 로딩 처리 및 최신 Agentic UI 패턴</p>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+
+        <!-- CARD 1: 데이터 시각화 & 마이크로 인터랙션 카드 -->
+        <div class="bg-white dark:bg-slate-900 rounded-3xl p-6 border border-slate-200 dark:border-slate-800 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between group">
+          <div>
+            <div class="flex items-center justify-between mb-4">
+              <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-50 dark:bg-indigo-950/70 text-indigo-600 dark:text-indigo-400 text-xs font-semibold">
+                <i class="ph-bold ph-chart-line-up"></i>
+                Data & Card
+              </span>
+              <button onclick="copySpec('card')" class="text-xs text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 flex items-center gap-1">
+                <i class="ph ph-copy"></i> MD 복사
+              </button>
+            </div>
+            <h3 class="text-lg font-bold text-slate-800 dark:text-slate-100">전환율 통계 카드 (Metric)</h3>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">호버 시 그림자 깊이 확대 및 카운터 동적 증가 인터랙션</p>
+
+            <div class="my-6 p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-100 dark:border-slate-800">
+              <div class="flex items-baseline justify-between">
+                <div>
+                  <span class="text-3xl font-extrabold text-slate-900 dark:text-white" id="counterNumber">3,842</span>
+                  <span class="text-xs font-medium text-slate-400 ml-1">건</span>
+                </div>
+                <span class="inline-flex items-center gap-1 text-xs font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 px-2 py-0.5 rounded-full">
+                  <i class="ph-bold ph-arrow-up-right"></i> +14.2%
+                </span>
+              </div>
+              <!-- 미니 진행률 바 -->
+              <div class="w-full bg-slate-200 dark:bg-slate-700 h-2 rounded-full mt-3 overflow-hidden">
+                <div class="bg-indigo-600 h-full rounded-full transition-all duration-700" style="width: 74%"></div>
+              </div>
+              <p class="text-[11px] text-slate-400 mt-2">목표 달성률 74% (전월 대비 우수)</p>
+            </div>
+          </div>
+
+          <button 
+            onclick="incrementCounter()" 
+            class="w-full py-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-indigo-50 hover:text-indigo-600 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold flex items-center justify-center gap-1.5 transition active:scale-95"
+          >
+            <i class="ph-bold ph-plus-circle"></i>
+            <span>동적 카운터 증가 시뮬레이션</span>
+          </button>
+        </div>
+
+        <!-- CARD 2: 입력 & 제어 컴포넌트 (Form Controls) -->
+        <div class="bg-white dark:bg-slate-900 rounded-3xl p-6 border border-slate-200 dark:border-slate-800 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between mb-4">
+              <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-950/70 text-emerald-600 dark:text-emerald-400 text-xs font-semibold">
+                <i class="ph-bold ph-sliders"></i>
+                Inputs & Controls
+              </span>
+              <button onclick="copySpec('inputs')" class="text-xs text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 flex items-center gap-1">
+                <i class="ph ph-copy"></i> MD 복사
+              </button>
+            </div>
+            <h3 class="text-lg font-bold text-slate-800 dark:text-slate-100">스마트 폼 & 제어자</h3>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">유효성 검증, 세그먼트 컨트롤, 토글 스위치</p>
+
+            <div class="space-y-4 my-4">
+              <!-- 유효성 검사 텍스트 입력 필드 -->
+              <div class="space-y-1">
+                <label class="block text-xs font-medium text-slate-600 dark:text-slate-300">사용자 계정 (실시간 검증)</label>
+                <div class="relative">
+                  <input 
+                    type="text" 
+                    id="usernameInput"
+                    placeholder="이메일 형식 입력..." 
+                    oninput="validateInput(this)"
+                    class="w-full px-3.5 py-2 text-xs rounded-xl bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition"
+                  />
+                  <i id="validationIcon" class="ph-fill ph-check-circle text-emerald-500 absolute right-3 top-1/2 -translate-y-1/2 text-sm hidden"></i>
+                </div>
+                <p id="helperText" class="text-[11px] text-slate-400">@를 포함한 이메일 주소를 입력하세요.</p>
+              </div>
+
+              <!-- 세그먼트 컨트롤 (Segmented Control) -->
+              <div class="space-y-1">
+                <label class="block text-xs font-medium text-slate-600 dark:text-slate-300">조회 주기 (Segmented Control)</label>
+                <div class="grid grid-cols-3 p-1 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs font-medium">
+                  <button onclick="setSegment(this)" class="seg-btn py-1.5 rounded-lg bg-white dark:bg-slate-700 shadow-xs text-slate-800 dark:text-white transition">일간</button>
+                  <button onclick="setSegment(this)" class="seg-btn py-1.5 rounded-lg text-slate-500 hover:text-slate-800 dark:text-slate-400 transition">주간</button>
+                  <button onclick="setSegment(this)" class="seg-btn py-1.5 rounded-lg text-slate-500 hover:text-slate-800 dark:text-slate-400 transition">월간</button>
+                </div>
+              </div>
+
+              <!-- 토글 스위치 (Toggle Switch) -->
+              <div class="flex items-center justify-between pt-1">
+                <div>
+                  <span class="text-xs font-medium text-slate-700 dark:text-slate-200 block">실시간 푸시 알림</span>
+                  <span class="text-[10px] text-slate-400">중요 상태 변경 알림 수신</span>
+                </div>
+                <button 
+                  id="toggleSwitch" 
+                  onclick="togglePushSwitch()" 
+                  class="w-11 h-6 rounded-full bg-indigo-600 transition-colors relative flex items-center p-0.5"
+                >
+                  <span class="w-5 h-5 rounded-full bg-white shadow-md transform translate-x-5 transition-transform duration-200"></span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- CARD 3: 피드백 & 오버레이 (Feedback & Overlays) -->
+        <div class="bg-white dark:bg-slate-900 rounded-3xl p-6 border border-slate-200 dark:border-slate-800 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between mb-4">
+              <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-50 dark:bg-amber-950/70 text-amber-600 dark:text-amber-400 text-xs font-semibold">
+                <i class="ph-bold ph-bell-ringing"></i>
+                Feedback & Overlays
+              </span>
+              <button onclick="copySpec('feedback')" class="text-xs text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 flex items-center gap-1">
+                <i class="ph ph-copy"></i> MD 복사
+              </button>
+            </div>
+            <h3 class="text-lg font-bold text-slate-800 dark:text-slate-100">피드백 플레이그라운드</h3>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">모달 팝업, 토스트 알림, 스켈레톤 로딩 상태 토글</p>
+
+            <!-- 스켈레톤 시뮬레이션 영역 -->
+            <div id="skeletonArea" class="my-4 p-4 rounded-2xl border border-dashed border-slate-200 dark:border-slate-800">
+              <div class="content-normal space-y-2">
+                <div class="flex items-center gap-3">
+                  <div class="w-8 h-8 rounded-full bg-indigo-100 dark:bg-indigo-900 text-indigo-600 dark:text-indigo-300 flex items-center justify-center text-xs font-bold">
+                    OK
+                  </div>
+                  <div>
+                    <h4 class="text-xs font-bold text-slate-800 dark:text-slate-200">데이터 로드 완료 상태</h4>
+                    <p class="text-[11px] text-slate-400">정상적으로 캐시된 API 리소스 24개</p>
+                  </div>
+                </div>
+              </div>
+              <!-- 숨김 스켈레톤 상태 -->
+              <div class="content-skeleton hidden space-y-2">
+                <div class="flex items-center gap-3">
+                  <div class="w-8 h-8 rounded-full bg-slate-200 dark:bg-slate-800 animate-pulse"></div>
+                  <div class="space-y-1.5 flex-1">
+                    <div class="h-3 bg-slate-200 dark:bg-slate-800 rounded animate-pulse w-3/4"></div>
+                    <div class="h-2.5 bg-slate-200 dark:bg-slate-800 rounded animate-pulse w-1/2"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-3 gap-2">
+            <button onclick="openModal()" class="py-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-700 dark:text-slate-200 text-xs font-medium transition active:scale-95">
+              Modal
+            </button>
+            <button onclick="triggerLiveToast('성공적으로 변경사항이 저장되었습니다!')" class="py-2 rounded-xl bg-indigo-50 dark:bg-indigo-950/70 text-indigo-600 dark:text-indigo-300 hover:bg-indigo-100 text-xs font-medium transition active:scale-95">
+              Toast
+            </button>
+            <button onclick="toggleSkeleton()" class="py-2 rounded-xl bg-amber-50 dark:bg-amber-950/70 text-amber-700 dark:text-amber-300 hover:bg-amber-100 text-xs font-medium transition active:scale-95">
+              Skeleton
+            </button>
+          </div>
+        </div>
+
+        <!-- CARD 4: 아코디언 & 탭 (Disclosure & Navigation) -->
+        <div class="bg-white dark:bg-slate-900 rounded-3xl p-6 border border-slate-200 dark:border-slate-800 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between mb-4">
+              <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-purple-50 dark:bg-purple-950/70 text-purple-600 dark:text-purple-400 text-xs font-semibold">
+                <i class="ph-bold ph-folders"></i>
+                Disclosure & Tabs
+              </span>
+              <button onclick="copySpec('disclosure')" class="text-xs text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 flex items-center gap-1">
+                <i class="ph ph-copy"></i> MD 복사
+              </button>
+            </div>
+            <h3 class="text-lg font-bold text-slate-800 dark:text-slate-100">아코디언 및 콘텐츠 탭</h3>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">접이식 상세 정보 및 공간 절약형 탭 인터페이스</p>
+
+            <!-- 탭 헤더 -->
+            <div class="flex border-b border-slate-200 dark:border-slate-800 mt-4 text-xs font-semibold">
+              <button onclick="switchTab(1)" id="tabBtn1" class="py-2 px-3 border-b-2 border-indigo-600 text-indigo-600 dark:text-indigo-400 transition">기능 명세</button>
+              <button onclick="switchTab(2)" id="tabBtn2" class="py-2 px-3 border-b-2 border-transparent text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition">접근성 (A11y)</button>
+            </div>
+
+            <!-- 탭 본문 -->
+            <div class="py-3">
+              <div id="tabContent1" class="text-xs text-slate-600 dark:text-slate-300 space-y-2">
+                <!-- 아코디언 컴포넌트 1 -->
+                <div class="border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
+                  <button onclick="toggleAccordion('acc1')" class="w-full px-3.5 py-2.5 text-left flex items-center justify-between bg-slate-50/50 dark:bg-slate-800/40 hover:bg-slate-100 dark:hover:bg-slate-800 transition">
+                    <span class="font-medium text-slate-800 dark:text-slate-200">Q. 모바일 환경에서의 인터랙션 원칙은?</span>
+                    <i id="accIcon-acc1" class="ph ph-caret-down transition-transform"></i>
+                  </button>
+                  <div id="acc1" class="hidden px-3.5 py-2.5 text-[11px] text-slate-500 dark:text-slate-400 bg-white dark:bg-slate-900 border-t border-slate-100 dark:border-slate-800 leading-relaxed">
+                    최소 44×44px 터치 타깃을 확보하고, 엄지손가락 영역(Thumb zone)을 고려해 하단 시트(Bottom Sheet)로 전환합니다.
+                  </div>
+                </div>
+
+                <!-- 아코디언 컴포넌트 2 -->
+                <div class="border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
+                  <button onclick="toggleAccordion('acc2')" class="w-full px-3.5 py-2.5 text-left flex items-center justify-between bg-slate-50/50 dark:bg-slate-800/40 hover:bg-slate-100 dark:hover:bg-slate-800 transition">
+                    <span class="font-medium text-slate-800 dark:text-slate-200">Q. 마이크로 인터랙션 타이밍은?</span>
+                    <i id="accIcon-acc2" class="ph ph-caret-down transition-transform"></i>
+                  </button>
+                  <div id="acc2" class="hidden px-3.5 py-2.5 text-[11px] text-slate-500 dark:text-slate-400 bg-white dark:bg-slate-900 border-t border-slate-100 dark:border-slate-800 leading-relaxed">
+                    일반적으로 150ms ~ 300ms 사이의 ease-out 커브를 권장하여 지연감 없이 민첩한 조작감을 제공합니다.
+                  </div>
+                </div>
+              </div>
+
+              <div id="tabContent2" class="hidden text-xs text-slate-600 dark:text-slate-300 space-y-2">
+                <ul class="list-disc pl-4 space-y-1 text-[11px] text-slate-500 dark:text-slate-400">
+                  <li><code class="text-indigo-500 font-mono">aria-expanded</code> 속성으로 개폐 상태 알림</li>
+                  <li>키보드 <kbd class="px-1 py-0.5 bg-slate-100 dark:bg-slate-800 border rounded text-[10px]">Tab</kbd> 및 <kbd class="px-1 py-0.5 bg-slate-100 dark:bg-slate-800 border rounded text-[10px]">Enter/Space</kbd> 탐색 지원</li>
+                  <li>모달 진입 시 포커스 트랩(Focus Trap) 적용 필수</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- CARD 5: 최신 Agentic & Generative UI (2026 트렌드) -->
+        <div class="md:col-span-2 lg:col-span-2 bg-gradient-to-br from-indigo-900/5 via-violet-900/5 to-pink-900/5 dark:from-slate-900 dark:via-indigo-950/30 dark:to-slate-900 rounded-3xl p-6 border border-indigo-200/60 dark:border-indigo-900/40 shadow-sm hover:shadow-xl transition-all duration-300 flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between mb-4">
+              <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-pink-50 dark:bg-pink-950/70 text-pink-600 dark:text-pink-400 text-xs font-semibold">
+                <i class="ph-bold ph-sparkle"></i>
+                Modern Agentic & Generative UI
+              </span>
+              <button onclick="copySpec('agentic')" class="text-xs text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 flex items-center gap-1">
+                <i class="ph ph-copy"></i> MD 복사
+              </button>
+            </div>
+            
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <h3 class="text-lg font-bold text-slate-900 dark:text-white">AI 에이전트 인터랙션 & 동적 뷰 패턴</h3>
+                <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">스트리밍 추론 인디케이터(Thinking State), 출처 칩(Citation), 승인(Human-in-the-loop)</p>
+              </div>
+              <span class="text-[11px] font-mono px-2 py-1 rounded-lg bg-indigo-100/70 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-300">
+                Agent Status: Active
+              </span>
+            </div>
+
+            <!-- AI 스트리밍 & 결과 UI 시뮬레이션 박스 -->
+            <div class="mt-4 p-4 rounded-2xl bg-white/90 dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 shadow-sm space-y-3">
+              <!-- 에이전트 생각 중 상태 (Thinking State) -->
+              <div id="aiThinkingState" class="flex items-center gap-2 text-xs text-indigo-600 dark:text-indigo-400 font-medium">
+                <div class="flex gap-1 items-center">
+                  <span class="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce"></span>
+                  <span class="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce [animation-delay:0.2s]"></span>
+                  <span class="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce [animation-delay:0.4s]"></span>
+                </div>
+                <span>에이전트가 화면 레이아웃 토큰을 분석 중입니다...</span>
+              </div>
+
+              <!-- 동적 생성 UI 카드 (Generative Card) -->
+              <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-700/60 space-y-2">
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                    <i class="ph-bold ph-check text-emerald-500"></i> 추천 컴포넌트 조합: Bento Grid 3-Col
+                  </span>
+                  <span class="text-[10px] text-slate-400">신뢰도 98.4%</span>
+                </div>
+                <p class="text-xs text-slate-600 dark:text-slate-300">
+                  사용자의 데스크톱 뷰포트 폭(1280px+)에 맞추어 카드를 3열 비정형 그리드로 자동 리사이징했습니다.
+                </p>
+
+                <!-- 출처 및 근거 칩 (Citation Chips) -->
+                <div class="flex flex-wrap gap-1.5 pt-1">
+                  <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white dark:bg-slate-700 text-[10px] text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-600">
+                    <i class="ph ph-link-simple"></i> WCAG 2.2 지침
+                  </span>
+                  <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white dark:bg-slate-700 text-[10px] text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-600">
+                    <i class="ph ph-link-simple"></i> 디자인 토큰 #spacing-04
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 프롬프트 인터랙션 입력창 -->
+          <div class="mt-4 flex gap-2">
+            <input 
+              type="text" 
+              id="agentPromptInput"
+              placeholder="UI 수정 명령 입력 (예: 다크 모드 대비 강화해줘)..." 
+              class="flex-1 px-4 py-2 text-xs rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              onkeydown="if(event.key==='Enter') simulateAgentRun()"
+            />
+            <button 
+              onclick="simulateAgentRun()"
+              class="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold flex items-center gap-1.5 transition active:scale-95 shadow-sm"
+            >
+              <i class="ph-bold ph-paper-plane-right"></i>
+              <span>실행</span>
+            </button>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ==============================================================
+         4. Footer Navigation Bar (FNB)
+         ============================================================== -->
+    <footer class="pt-8 pb-12 border-t border-slate-200 dark:border-slate-800 text-xs text-slate-500 dark:text-slate-400 flex flex-col sm:flex-row items-center justify-between gap-4">
+      <div class="flex items-center gap-2">
+        <span class="font-bold text-slate-700 dark:text-slate-300">DesignSpec Framework</span>
+        <span>•</span>
+        <span>웹 기획자 및 디자이너를 위한 화면 설계 마크다운 표준</span>
+      </div>
+      <div class="flex items-center gap-6">
+        <a href="#top" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition">맨 위로 이동</a>
+        <button onclick="toggleDocPanel()" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition font-medium">전체 MD 명세 다운로드 뷰</button>
+      </div>
+    </footer>
+
+  </main>
+
+  <!-- ==============================================================
+       5. 슬라이드 아웃 사이드 패널: 실시간 MD 기획 명세서 뷰어
+       ============================================================== -->
+  <aside 
+    id="docPanel" 
+    class="fixed top-0 right-0 h-full w-full sm:w-[540px] bg-white dark:bg-slate-900 border-l border-slate-200 dark:border-slate-800 shadow-2xl z-50 transform translate-x-full transition-transform duration-300 ease-in-out flex flex-col"
+  >
+    <!-- 패널 헤더 -->
+    <div class="p-4 sm:p-5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50/80 dark:bg-slate-900/80">
+      <div class="flex items-center gap-2">
+        <div class="p-2 rounded-lg bg-indigo-600 text-white">
+          <i class="ph-bold ph-file-code text-lg"></i>
+        </div>
+        <div>
+          <h3 class="text-sm font-bold text-slate-900 dark:text-white">화면 기획용 Markdown 명세</h3>
+          <p class="text-[11px] text-slate-400">기획서 파일(.md)에 그대로 붙여넣을 수 있습니다</p>
+        </div>
+      </div>
+      <div class="flex items-center gap-1.5">
+        <button 
+          onclick="copyAllMarkdown()" 
+          class="px-2.5 py-1.5 rounded-lg bg-indigo-50 dark:bg-indigo-950/70 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 text-xs font-semibold flex items-center gap-1 transition"
+        >
+          <i class="ph-bold ph-copy"></i>
+          <span>전체 복사</span>
+        </button>
+        <button 
+          onclick="toggleDocPanel()" 
+          class="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition"
+        >
+          <i class="ph-bold ph-x text-lg"></i>
+        </button>
+      </div>
+    </div>
+
+    <!-- 패널 필터 탭 -->
+    <div class="px-5 py-2.5 border-b border-slate-100 dark:border-slate-800/80 bg-slate-50/40 dark:bg-slate-900/40 flex gap-2 overflow-x-auto text-xs">
+      <button onclick="filterDoc('all')" class="doc-tab-btn px-2.5 py-1 rounded-md bg-indigo-600 text-white font-medium">전체 보기</button>
+      <button onclick="filterDoc('layout')" class="doc-tab-btn px-2.5 py-1 rounded-md text-slate-500 hover:text-slate-800 dark:text-slate-400 font-medium">레이아웃</button>
+      <button onclick="filterDoc('controls')" class="doc-tab-btn px-2.5 py-1 rounded-md text-slate-500 hover:text-slate-800 dark:text-slate-400 font-medium">입력/컨트롤</button>
+      <button onclick="filterDoc('feedback')" class="doc-tab-btn px-2.5 py-1 rounded-md text-slate-500 hover:text-slate-800 dark:text-slate-400 font-medium">피드백</button>
+      <button onclick="filterDoc('agentic')" class="doc-tab-btn px-2.5 py-1 rounded-md text-slate-500 hover:text-slate-800 dark:text-slate-400 font-medium">Agentic AI</button>
+    </div>
+
+    <!-- 패널 본문 (MD 코드 에디터 스타일) -->
+    <div class="flex-1 overflow-y-auto p-5 space-y-4 font-mono text-xs bg-slate-900 text-slate-200" id="markdownCodeArea">
+      <!-- 렌더링될 MD 텍스트 영역 -->
+    </div>
+  </aside>
+
+  <!-- ==============================================================
+       6. 인터랙티브 다이얼로그 (Modal Window)
+       ============================================================== -->
+  <div 
+    id="customModal" 
+    class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm opacity-0 pointer-events-none transition-all duration-300"
+    role="dialog" 
+    aria-modal="true"
+  >
+    <div class="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl p-6 shadow-2xl border border-slate-200 dark:border-slate-800 transform scale-95 transition-all duration-300" id="modalBox">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+        <div class="flex items-center gap-2">
+          <div class="w-8 h-8 rounded-xl bg-rose-100 dark:bg-rose-950 text-rose-600 dark:text-rose-400 flex items-center justify-center">
+            <i class="ph-bold ph-warning-circle text-lg"></i>
+          </div>
+          <h3 class="text-sm font-bold text-slate-900 dark:text-white">모달 대화상자 (Dialog Spec)</h3>
+        </div>
+        <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200">
+          <i class="ph-bold ph-x text-lg"></i>
+        </button>
+      </div>
+
+      <div class="py-4 space-y-2 text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+        <p><strong>인터랙션 명세:</strong></p>
+        <ul class="list-disc pl-4 space-y-1 text-slate-500 dark:text-slate-400">
+          <li>배경 딤(Dim) 레이어 클릭 시 닫기 여부: <code class="font-mono text-indigo-500">True</code></li>
+          <li>키보드 <code class="font-mono text-indigo-500">Esc</code> 입력 시 다이얼로그 닫힘 처리</li>
+          <li>모달 내부 첫 번째 포커스 가능 요소로 자동 포커스 이동 (Focus Trap)</li>
+        </ul>
+      </div>
+
+      <div class="flex items-center justify-end gap-2 pt-2">
+        <button onclick="closeModal()" class="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition">
+          취소
+        </button>
+        <button onclick="confirmModalAction()" class="px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm transition active:scale-95">
+          확인 및 변경 적용
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==============================================================
+       7. 토스트 알림 컨테이너 (Toast Notification)
+       ============================================================== -->
+  <div id="toastContainer" class="fixed bottom-6 right-6 z-50 flex flex-col gap-2 pointer-events-none"></div>
+
+  <!-- ==============================================================
+       8. JavaScript 비즈니스 및 인터랙션 로직
+       ============================================================== -->
+  <script>
+    // -------------------------------------------------------------
+    // Markdown 명세서 데이터베이스 (기획서 작성용 템플릿 원문)
+    // -------------------------------------------------------------
+    const markdownSpecs = {
+      all: `# [화면 ID] SCR-01 대시보드 및 핵심 인터랙션 명세
+
+## 1. 기본 레이아웃 (Layout Specification)
+- **GNB**: Sticky (Top: 0), 로고 좌측, 검색바 중앙(Ctrl+K 바로가기), 우측 프로필 및 알림 배지
+- **Hero Section**: 글래스모피즘 + 앰비언트 블러 그라디언트, Primary CTA 및 문서 바로가기 버튼
+- **Grid Layout**: Bento Grid (Desktop: 3-Col, Tablet: 2-Col, Mobile: 1-Col 유동 배치)
+- **FNB**: 이용약관, 시스템 상태, 맨 위로 스크롤 링크 제공
+
+---
+
+## 2. 입력 및 제어 컴포넌트 (Inputs & Controls)
+| 컴포넌트 | 상태 (States) | 인터랙션 규칙 |
+| :--- | :--- | :--- |
+| **Email Input** | Default, Focus, Valid, Error | 텍스트 입력 시 정규식 실시간 검증. 통과 시 우측 체크 아이콘 표시 |
+| **Segmented Control** | Active, Hover | 클릭 시 활성 탭 인디케이터 슬라이드 이동 및 데이터 뷰 갱신 |
+| **Toggle Switch** | On / Off | 애니메이션 타임라인 200ms ease, 상태 변경 시 토스트 피드백 |
+
+---
+
+## 3. 피드백 및 오버레이 (Feedback & Overlays)
+- **Modal Dialog**:
+  - 배경 Dim 오버레이 투명도 60% + 블러 효과 적용
+  - 키보드 ESC 키 지원 및 포커스 트랩(Focus Trap) 유지
+- **Toast Notification**:
+  - 화면 우하단 스택(Stack) 형태로 노출
+  - 3.5초 후 자동 페이드아웃 소멸, 수동 닫기 버튼 포함
+- **Skeleton UI**:
+  - 데이터 페칭 지연 시 로딩 스피너 대신 회색 블록 펄스 애니메이션 노출 (CLS 방지)
+
+---
+
+## 4. 모던 Agentic & Generative UI 패턴 (2026+)
+- **Thinking State**: AI 추론 중 3-도트 바운스 및 텍스트 스트리밍 애니메이션
+- **Dynamic View**: 사용자 프롬프트 컨텍스트에 따라 그리드 구조 실시간 재배치
+- **Citation Chips**: 추천 컴포넌트 근거 명시 (WCAG 기준 및 디자인 토큰 링크)
+`,
+      layout: `### [레이아웃 명세: GNB & Hero]
+- **구조**: GNB (Sticky) -> Hero Section -> Bento Grid 3-Col
+- **반응형 브레이크포인트**:
+  - Mobile (< 768px): 검색창 드로어로 숨김, 1열 배치
+  - Tablet (768px - 1024px): 2열 그리드 배치
+  - Desktop (> 1024px): 3열 Bento Grid 활성화
+- **스크롤 옵저버**: 상단 스크롤 100px 초과 시 GNB 배경 블러 강화 (backdrop-blur-md)
+`,
+      controls: `### [입력 및 폼 제어자 명세]
+- **텍스트 필드 유효성 검사**:
+  - 규칙: \`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$\`
+  - 에러 상태: 테두리 \`rose-500\`, 헬퍼 텍스트 붉은색 전환
+  - 성공 상태: 우측 녹색 체크 아이콘 노출
+- **Segmented Control**:
+  - 옵션: 일간 / 주간 / 월간
+  - 단일 선택 강제 (Exclusive Selection)
+`,
+      feedback: `### [피드백 컴포넌트 명세]
+- **Toast 알림**:
+  - 트리거: 비동기 작업 성공/실패 시 노출
+  - 노출 시간: 3,500ms (호버 시 타이머 일시정지)
+  - 레이어 순서: \`z-index: 50\` 최상단
+- **스켈레톤 UI**:
+  - 애니메이션: \`animate-pulse\` (opacity 1.0 <-> 0.4)
+  - 최소 노출 시간: 400ms (화면 깜빡임 현상 방지)
+`,
+      agentic: `### [Agentic & Generative UI 명세]
+- **Thinking State Indicator**:
+  - 상태: 추론 시작 시 "스트리밍 중..." 인디케이터 표시
+  - 신뢰도 뱃지 (Confidence Score) 95% 이상 시 자동 렌더링
+- **Human-in-the-loop (승인)**:
+  - 중요 레이아웃 변경 전 "확인 및 변경 적용" 다이얼로그 강제
+`
+    };
+
+    // -------------------------------------------------------------
+    // 인터랙션 함수 구현
+    // -------------------------------------------------------------
+
+    // 1. 다크모드 토글
+    function toggleDarkMode() {
+      const html = document.documentElement;
+      const themeIcon = document.getElementById('themeIcon');
+      if (html.classList.contains('dark')) {
+        html.classList.remove('dark');
+        themeIcon.classList.replace('ph-sun', 'ph-moon');
+      } else {
+        html.classList.add('dark');
+        themeIcon.classList.replace('ph-moon', 'ph-sun');
+      }
+    }
+
+    // 2. MD 명세 패널 열기/닫기
+    function toggleDocPanel() {
+      const panel = document.getElementById('docPanel');
+      panel.classList.toggle('translate-x-full');
+      renderMarkdownCode('all');
+    }
+
+    function filterDoc(category) {
+      // 탭 버튼 스타일 갱신
+      document.querySelectorAll('.doc-tab-btn').forEach(btn => {
+        btn.classList.remove('bg-indigo-600', 'text-white');
+        btn.classList.add('text-slate-500', 'dark:text-slate-400');
+      });
+      event.target.classList.add('bg-indigo-600', 'text-white');
+      event.target.classList.remove('text-slate-500', 'dark:text-slate-400');
+
+      renderMarkdownCode(category);
+    }
+
+    function renderMarkdownCode(category) {
+      const codeArea = document.getElementById('markdownCodeArea');
+      const text = markdownSpecs[category] || markdownSpecs['all'];
+      codeArea.innerHTML = `<pre class="whitespace-pre-wrap leading-relaxed select-all"><code>${escapeHtml(text)}</code></pre>`;
+    }
+
+    function escapeHtml(str) {
+      return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    // 3. 클립보드 복사 헬퍼 (iFrame 안전 방식)
+    function safeCopy(text, msg) {
+      const textArea = document.createElement("textarea");
+      textArea.value = text;
+      textArea.style.position = "fixed";
+      textArea.style.left = "-999999px";
+      document.body.appendChild(textArea);
+      textArea.select();
+      try {
+        document.execCommand('copy');
+        triggerLiveToast(msg || '클립보드에 마크다운 명세가 복사되었습니다!');
+      } catch (err) {
+        triggerLiveToast('복사에 실패했습니다. 직접 복사해주세요.');
+      }
+      document.body.removeChild(textArea);
+    }
+
+    function copySpec(type) {
+      const text = markdownSpecs[type] || markdownSpecs['all'];
+      safeCopy(text, `[${type.toUpperCase()}] 컴포넌트 명세가 복사되었습니다!`);
+    }
+
+    function copyAllMarkdown() {
+      safeCopy(markdownSpecs['all'], '전체 기획서 명세 템플릿이 복사되었습니다!');
+    }
+
+    // 4. 토스트 알림 띄우기
+    function triggerLiveToast(message) {
+      const container = document.getElementById('toastContainer');
+      const toast = document.createElement('div');
+      toast.className = "pointer-events-auto flex items-center gap-2.5 px-4 py-3 rounded-2xl bg-slate-900 text-white dark:bg-white dark:text-slate-900 shadow-xl border border-slate-700/50 dark:border-slate-200 text-xs font-medium transform translate-y-4 opacity-0 transition-all duration-300";
+      toast.innerHTML = `
+        <i class="ph-fill ph-check-circle text-emerald-400 text-base"></i>
+        <span>${message}</span>
+      `;
+      container.appendChild(toast);
+
+      // 애니메이션 노출
+      requestAnimationFrame(() => {
+        toast.classList.remove('translate-y-4', 'opacity-0');
+      });
+
+      // 3.5초 후 제거
+      setTimeout(() => {
+        toast.classList.add('opacity-0', 'translate-y-2');
+        setTimeout(() => toast.remove(), 300);
+      }, 3500);
+    }
+
+    // 5. 카운터 증가 시뮬레이션
+    let countVal = 3842;
+    function incrementCounter() {
+      countVal += Math.floor(Math.random() * 25) + 5;
+      const counterEl = document.getElementById('counterNumber');
+      counterEl.textContent = countVal.toLocaleString();
+      counterEl.classList.add('scale-110', 'text-indigo-600');
+      setTimeout(() => counterEl.classList.remove('scale-110', 'text-indigo-600'), 200);
+    }
+
+    // 6. 텍스트 입력창 유효성 검증
+    function validateInput(input) {
+      const icon = document.getElementById('validationIcon');
+      const helper = document.getElementById('helperText');
+      const isValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.value.trim());
+
+      if (isValid) {
+        icon.classList.remove('hidden');
+        input.classList.remove('border-rose-500');
+        input.classList.add('border-emerald-500');
+        helper.textContent = "올바른 이메일 형식입니다.";
+        helper.className = "text-[11px] text-emerald-500";
+      } else {
+        icon.classList.add('hidden');
+        if (input.value.length > 0) {
+          input.classList.add('border-rose-500');
+          helper.textContent = "올바른 이메일 형식이 아닙니다 (예: user@domain.com)";
+          helper.className = "text-[11px] text-rose-500";
+        } else {
+          input.classList.remove('border-rose-500', 'border-emerald-500');
+          helper.textContent = "@를 포함한 이메일 주소를 입력하세요.";
+          helper.className = "text-[11px] text-slate-400";
+        }
+      }
+    }
+
+    // 7. 세그먼트 버튼 선택
+    function setSegment(btn) {
+      document.querySelectorAll('.seg-btn').forEach(b => {
+        b.className = "seg-btn py-1.5 rounded-lg text-slate-500 hover:text-slate-800 dark:text-slate-400 transition";
+      });
+      btn.className = "seg-btn py-1.5 rounded-lg bg-white dark:bg-slate-700 shadow-xs text-slate-800 dark:text-white font-bold transition";
+      triggerLiveToast(`조회 주기가 '${btn.textContent}'(으)로 전환되었습니다.`);
+    }
+
+    // 8. 토글 스위치 인터랙션
+    let pushEnabled = true;
+    function togglePushSwitch() {
+      pushEnabled = !pushEnabled;
+      const switchBtn = document.getElementById('toggleSwitch');
+      const knob = switchBtn.querySelector('span');
+
+      if (pushEnabled) {
+        switchBtn.classList.replace('bg-slate-300', 'bg-indigo-600');
+        knob.classList.add('translate-x-5');
+        triggerLiveToast('푸시 알림이 활성화되었습니다.');
+      } else {
+        switchBtn.classList.replace('bg-indigo-600', 'bg-slate-300');
+        knob.classList.remove('translate-x-5');
+        triggerLiveToast('푸시 알림이 비활성화되었습니다.');
+      }
+    }
+
+    // 9. 모달 열기/닫기
+    function openModal() {
+      const modal = document.getElementById('customModal');
+      const box = document.getElementById('modalBox');
+      modal.classList.remove('opacity-0', 'pointer-events-none');
+      box.classList.remove('scale-95');
+    }
+
+    function closeModal() {
+      const modal = document.getElementById('customModal');
+      const box = document.getElementById('modalBox');
+      modal.classList.add('opacity-0', 'pointer-events-none');
+      box.classList.add('scale-95');
+    }
+
+    function confirmModalAction() {
+      closeModal();
+      triggerLiveToast('설정 사항이 시스템에 영구 적용되었습니다.');
+    }
+
+    // 모달 배경 클릭 시 닫기
+    document.getElementById('customModal').addEventListener('click', (e) => {
+      if (e.target.id === 'customModal') closeModal();
+    });
+
+    // 10. 스켈레톤 로딩 토글
+    let isSkeleton = false;
+    function toggleSkeleton() {
+      isSkeleton = !isSkeleton;
+      const normal = document.querySelector('.content-normal');
+      const skeleton = document.querySelector('.content-skeleton');
+      if (isSkeleton) {
+        normal.classList.add('hidden');
+        skeleton.classList.remove('hidden');
+        triggerLiveToast('스켈레톤(Skeleton UI) 로딩 상태 활성화');
+      } else {
+        normal.classList.remove('hidden');
+        skeleton.classList.add('hidden');
+        triggerLiveToast('콘텐츠 로드 완료 상태로 복원');
+      }
+    }
+
+    // 11. 탭 전환
+    function switchTab(tabNum) {
+      const tab1 = document.getElementById('tabContent1');
+      const tab2 = document.getElementById('tabContent2');
+      const btn1 = document.getElementById('tabBtn1');
+      const btn2 = document.getElementById('tabBtn2');
+
+      if (tabNum === 1) {
+        tab1.classList.remove('hidden');
+        tab2.classList.add('hidden');
+        btn1.className = "py-2 px-3 border-b-2 border-indigo-600 text-indigo-600 dark:text-indigo-400 transition";
+        btn2.className = "py-2 px-3 border-b-2 border-transparent text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition";
+      } else {
+        tab1.classList.add('hidden');
+        tab2.classList.remove('hidden');
+        btn2.className = "py-2 px-3 border-b-2 border-indigo-600 text-indigo-600 dark:text-indigo-400 transition";
+        btn1.className = "py-2 px-3 border-b-2 border-transparent text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition";
+      }
+    }
+
+    // 12. 아코디언 개폐
+    function toggleAccordion(id) {
+      const content = document.getElementById(id);
+      const icon = document.getElementById(`accIcon-${id}`);
+      const isHidden = content.classList.contains('hidden');
+
+      if (isHidden) {
+        content.classList.remove('hidden');
+        icon.classList.add('rotate-180');
+      } else {
+        content.classList.add('hidden');
+        icon.classList.remove('rotate-180');
+      }
+    }
+
+    // 13. Agentic AI 시뮬레이션
+    function simulateAgentRun() {
+      const input = document.getElementById('agentPromptInput');
+      const thinking = document.getElementById('aiThinkingState');
+      const promptText = input.value.trim() || "다크 모드 대비 강화 및 여백 조정";
+
+      thinking.classList.remove('hidden');
+      thinking.innerHTML = `
+        <div class="flex gap-1 items-center">
+          <span class="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce"></span>
+          <span class="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce [animation-delay:0.2s]"></span>
+          <span class="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce [animation-delay:0.4s]"></span>
+        </div>
+        <span>'${promptText}' 지시를 파싱하여 컴포넌트를 재구성 중...</span>
+      `;
+
+      setTimeout(() => {
+        thinking.innerHTML = `
+          <i class="ph-bold ph-sparkle text-pink-500"></i>
+          <span>명령 수행 완료: 디자인 토큰 매핑 및 레이아웃 무결성 검증 완료</span>
+        `;
+        triggerLiveToast('✨ 에이전트가 화면 기획 요소를 최신 스펙으로 갱신했습니다.');
+        input.value = '';
+      }, 1500);
+    }
+
+    function highlightSearchGuide() {
+      triggerLiveToast('단축키 ⌘K 또는 컴포넌트 명칭(Modal, Card 등)을 입력해보세요.');
+    }
+
+    // 초기 실행
+    window.addEventListener('DOMContentLoaded', () => {
+      renderMarkdownCode('all');
+    });
+  </script>
+</body>
+</html>

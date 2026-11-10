@@ -1,6 +1,6 @@
 /* 내 업무: 처리 유형(일반업무/전자결재)과 처리 단계로만 관리합니다. 메뉴 안내 토스트도 이 파일에 있습니다. */
 let taskRequest = 0, taskFilterTimer, menuToastTimer;
-const openTasks = new Set();
+const openTasks = new Set(), selectedTasks = new Set();
 
 const MENU_HELP = {
   review: '같은 토픽의 메일 요약과 업무 후보를 펼쳐 보고 [업무에 반영]하거나 제외합니다.',
@@ -60,8 +60,10 @@ function taskRow(task, trash) {
          <label>기한<input id="due-${esc(task.id)}" type="date" value="${esc(task.due_date || '')}"></label>
          <button data-save="${esc(task.id)}">기한 저장</button>
          <button class="danger" data-task-delete="${esc(task.id)}">휴지통으로 이동</button></div></details>`;
+  // 처리완료는 다음 단계가 없어 선택 대상에서 뺍니다.
+  const check = trash || done ? '' : `<input type="checkbox" class="task-check" data-task-check="${esc(task.id)}" data-task-stage-key="${esc(task.work_kind + ':' + task.work_stage)}" aria-label="${esc(task.display_title || task.title)} 선택" ${selectedTasks.has(String(task.id)) ? 'checked' : ''}>`;
   return `<details class="task-item ${done ? 'is-completed' : ''}" data-task-item="${esc(task.id)}" ${openTasks.has(String(task.id)) ? 'open' : ''}>
-    <summary><span class="topic-chevron">›</span>
+    <summary>${check}<span class="topic-chevron">›</span>
       <span class="task-title"><b>${esc(task.display_title || task.title)}</b><small>${esc(task.assignee || '담당 미정')}</small></span>
       <span class="task-state ${done ? 'done' : ''}">${esc(stageLabel(task.work_kind, task.work_stage))}</span>
       <span class="task-date">${esc(taskDateText(task, trash))}</span>
@@ -115,8 +117,10 @@ function stageSections(tasks, stages, {kindFilter = '', showEmpty = false} = {})
       const items = ofKind.filter(task => task.work_stage === stage);
       if (!items.length && !showEmpty) return '';
       const key = 'stage:' + kind + ':' + stage;
+      const stageCheck = items.length && stage !== '처리완료'
+        ? `<input type="checkbox" class="task-check" data-stage-check="${esc(kind + ':' + stage)}" aria-label="${esc(stageLabel(kind, stage))} 전체 선택">` : '';
       return `<details class="task-stage" data-task-stage="${esc(kind + ':' + stage)}" data-section="${esc(key)}" ${closedSections.has(key) ? '' : 'open'}>
-        <summary class="task-stage-heading"><span class="topic-chevron">›</span>${esc(STAGE_NUMBERS[index] + ' ' + stageLabel(kind, stage))} <span data-task-count>${items.length}</span></summary>
+        <summary class="task-stage-heading">${stageCheck}<span class="topic-chevron">›</span>${esc(STAGE_NUMBERS[index] + ' ' + stageLabel(kind, stage))} <span data-task-count>${items.length}</span></summary>
         ${items.length ? topicGroups(items, false) : '<p class="subtle task-stage-empty">해당 업무가 없습니다.</p>'}</details>`;
     }).join('');
     const key = 'kind:' + kind;
@@ -202,6 +206,11 @@ async function renderTasks() {
       else closedSections.add(element.dataset.section);
       saveClosedSections();
     }));
+    // 화면에 없는 업무는 선택에서 뺍니다.
+    const visible = new Set([...$('task-list').querySelectorAll('[data-task-check]')].map(box => box.dataset.taskCheck));
+    for (const id of [...selectedTasks]) if (!visible.has(id)) selectedTasks.delete(id);
+    $('task-bulk').hidden = trash || !visible.size;
+    updateTaskSelection();
     const advanced = [$('task-completed-start').value, $('task-completed-end').value, trash].filter(Boolean).length;
     $('advanced-filter-count').textContent = advanced ? `${advanced}개 적용` : '';
   } catch (error) {
@@ -265,6 +274,49 @@ document.addEventListener('click', event => {
     notice(operation === 'delete' ? '업무를 휴지통으로 이동했습니다. 변경 이력은 유지됩니다.' : '업무를 복원했습니다. 일반 목록에서 확인할 수 있습니다.');
     await refresh();
   });
+});
+
+// 선택 항목 다음 단계로: 미확인→확인완료→진행중→처리완료, 전자결재 미처리→처리완료
+function updateTaskSelection() {
+  const boxes = [...$('task-list').querySelectorAll('[data-task-check]')];
+  boxes.forEach(box => box.checked = selectedTasks.has(box.dataset.taskCheck));
+  $('task-list').querySelectorAll('[data-stage-check]').forEach(stageBox => {
+    const own = boxes.filter(box => box.dataset.taskStageKey === stageBox.dataset.stageCheck);
+    stageBox.checked = own.length > 0 && own.every(box => box.checked);
+    stageBox.indeterminate = !stageBox.checked && own.some(box => box.checked);
+  });
+  const count = selectedTasks.size;
+  $('task-selected').textContent = `선택 ${count}개`;
+  $('task-advance').disabled = !count;
+  $('task-select-all').checked = boxes.length > 0 && boxes.every(box => box.checked);
+  $('task-select-all').indeterminate = count > 0 && !$('task-select-all').checked;
+}
+
+document.addEventListener('click', event => {
+  if (event.target.closest('input[data-task-check], input[data-stage-check]')) event.stopPropagation();
+}, true);
+document.addEventListener('change', event => {
+  const box = event.target;
+  if (box.dataset?.taskCheck) {
+    if (box.checked) selectedTasks.add(box.dataset.taskCheck); else selectedTasks.delete(box.dataset.taskCheck);
+  } else if (box.dataset?.stageCheck) {
+    $('task-list').querySelectorAll(`[data-task-stage-key="${CSS.escape(box.dataset.stageCheck)}"]`).forEach(item => {
+      if (box.checked) selectedTasks.add(item.dataset.taskCheck); else selectedTasks.delete(item.dataset.taskCheck);
+    });
+  } else if (box.id === 'task-select-all') {
+    $('task-list').querySelectorAll('[data-task-check]').forEach(item => {
+      if (box.checked) selectedTasks.add(item.dataset.taskCheck); else selectedTasks.delete(item.dataset.taskCheck);
+    });
+  } else return;
+  updateTaskSelection();
+});
+$('task-advance').onclick = () => action(async () => {
+  const ids = [...selectedTasks];
+  const result = await api('/api/task/advance', {ids});
+  selectedTasks.clear();
+  const failed = result.failed.length ? ` · 실패 ${result.failed.length}건 (${result.failed[0].error})` : '';
+  notice(`업무 ${result.done}건을 다음 단계로 옮겼습니다. 단계별 변경 이력이 남습니다.` + failed, !!result.failed.length);
+  await refresh();
 });
 
 $('reply-close').onclick = () => $('reply-dialog').close();

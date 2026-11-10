@@ -408,7 +408,27 @@ class Store:
         topic = (topics if topics is not None else self.topic_by_message()).get(task.get("source_id"))
         return work_kind(topic["category"] if topic else category(f"{task.get('project') or ''} {task.get('title') or ''}"))
 
-    def task_action(self, task_id, action):
+    def advance_tasks(self, task_ids):
+        """선택한 업무를 각자의 다음 단계로 한 번에 옮깁니다. 처리완료 업무는 다음 단계가 없어 실패로 돌려줍니다."""
+        if not isinstance(task_ids, list) or not task_ids or len(task_ids) > 500 or not all(isinstance(x, str) for x in task_ids):
+            raise ValueError("다음 단계로 옮길 업무를 1~500개 선택하세요.")
+        topics = self.topic_by_message()
+        done, failed = 0, []
+        for task_id in dict.fromkeys(task_ids):
+            row = self.rows("SELECT * FROM tasks WHERE id=? AND deleted_at IS NULL", (task_id,))
+            if not row:
+                failed.append({"id": task_id, "title": "", "error": "업무를 찾지 못했습니다."})
+                continue
+            kind = self.task_kind(row[0], topics)
+            forward = [a for a in TASK_ACTIONS[kind].get(work_stage(row[0], kind), {}) if a != "reopen"]
+            if not forward:
+                failed.append({"id": task_id, "title": row[0]["title"], "error": "처리완료 업무는 다음 단계가 없습니다."})
+                continue
+            self.task_action(task_id, forward[0], topics)
+            done += 1
+        return {"done": done, "failed": failed}
+
+    def task_action(self, task_id, action, topics=None):
         if action not in ACTION_KINDS:
             raise ValueError("업무 처리 동작이 올바르지 않습니다.")
         with self.connect() as db:
@@ -416,7 +436,7 @@ class Store:
         if not row:
             raise ValueError("업무를 찾지 못했습니다.")
         task = dict(row)
-        kind = self.task_kind(task)
+        kind = self.task_kind(task, topics)
         stage = work_stage(task, kind)
         allowed = TASK_ACTIONS[kind].get(stage, {})
         if action not in allowed:

@@ -212,6 +212,13 @@ class WebTests(unittest.TestCase):
         self.assertEqual(error.exception.code,400)
         with self.request('/api/tasks?group=open',headers=headers) as response:tasks=json.load(response)
         self.assertTrue(all(t['work_stage']!='처리완료' for t in tasks['tasks']))
+        mine=[t['id'] for t in tasks['tasks'] if t['source_id'] in ('bulk-1','bulk-2')]
+        self.assertTrue(mine)
+        with self.request('/api/task/advance',{'ids':mine},headers) as response:advanced=json.load(response)
+        self.assertEqual(advanced['done'],len(mine))
+        with self.assertRaises(HTTPError) as error:
+            self.request('/api/task/advance',{'ids':'bad'},headers)
+        self.assertEqual(error.exception.code,400)
 
     def test_solution_endpoint_requires_auth_and_returns_evidence(self):
         headers={"X-App-Token":self.token}

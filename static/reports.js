@@ -35,14 +35,14 @@ function renderReports() {
   }
   $('report-list').innerHTML = state.reports.map(report => {
     const doc = report.document ? JSON.parse(report.document) : null;
-    const heading = `<div class="report-heading"><b>${esc(doc?.title || '주간 보고')} · ${esc(report.start_date)} ~ ${esc(report.end_date)}</b><div class="button-row">${doc ? `<button data-pdf="${esc(report.id)}">PDF 다운로드</button>` : ''}<button data-download="${esc(report.id)}">Markdown 다운로드</button></div></div>`;
+    const heading = `<div class="report-heading"><b>${esc(doc?.title || '주간 보고')} (${esc(report.start_date)} ~ ${esc(report.end_date)})</b><div class="button-row">${doc ? `<button class="primary" data-wiki-copy="${esc(report.id)}">WIKI에 복사</button><button data-pdf="${esc(report.id)}">PDF 다운로드</button>` : ''}<button data-download="${esc(report.id)}">Markdown 다운로드</button></div></div>`;
     // 이전 버전 보고서(상태 문구가 들어간 형식)는 다시 생성하도록 안내합니다.
     if (!doc || !doc.rows.every(row => [...row.this_week, ...row.next_week].every(item => Array.isArray(item.points) && item.id))) {
       return `<article class="panel">${heading}<p class="report-basis">이전 형식의 보고서입니다. 같은 기간으로 다시 생성하면 확정 업무 기준의 요약형 보고서와 항목 수정 기능을 사용할 수 있습니다.</p></article>`;
     }
     const rows = doc.rows.filter(row => row.this_week.length || row.next_week.length || row.notes.length);
     const body = rows.length ? `<div class="report-scroll"><table class="weekly-table"><thead><tr>${doc.columns.map(column => `<th>${esc(column)}</th>`).join('')}</tr></thead><tbody>${rows.map(row =>
-      `<tr><th>${esc(row.category)}</th><td>${reportCell(report.id, row.this_week)}</td><td>${reportCell(report.id, row.next_week)}</td><td>${row.notes.map(note => `<p>${esc(note)}</p>`).join('')}${[...new Set([...row.this_week, ...row.next_week].flatMap(item => item.source_ids))].map(id => source(id)).join('<br>')}</td></tr>`).join('')}</tbody></table></div>`
+      `<tr><th>${esc(row.category)}</th><td>${reportCell(report.id, row.this_week)}</td><td>${reportCell(report.id, row.next_week)}</td><td>${row.notes.map(note => `<p>${esc(note)}</p>`).join('')}</td></tr>`).join('')}</tbody></table></div>`
       : empty('확정된 업무가 없습니다', '내 업무에서 업무를 확인하거나 진행하면 보고서에 반영됩니다.');
     return `<article class="panel">${heading}<p class="report-basis">${esc(doc.basis)}</p>${body}</article>`;
   }).join('');
@@ -81,4 +81,44 @@ document.addEventListener('click', event => {
       await refresh();
     });
   }
+});
+
+/* WIKI에 복사: 위키 편집기에는 HTML 표로, 텍스트 위키에는 Markdown 표로 붙도록 두 형식을 함께 복사합니다. */
+function wikiTables(doc) {
+  const rows = doc.rows.filter(row => row.this_week.length || row.next_week.length || row.notes.length);
+  const htmlItems = items => items.length ? items.map((item, index) =>
+    `<p><b>${index + 1}. ${esc(item.title)}</b> (${esc(reportPeriod(item))})</p><ul>${item.points.map(point => `<li>${esc(point)}</li>`).join('')}</ul>`).join('') : '해당 없음';
+  const mdItems = items => items.length ? items.map((item, index) =>
+    `**${index + 1}. ${item.title}** (${reportPeriod(item)})<br>` + item.points.map(point => '- ' + point).join('<br>')).join('<br>') : '해당 없음';
+  const cellText = text => String(text).replace(/\|/g, '\\|').replace(/\n/g, ' ');
+  const html = `<h2>${esc(doc.title)} (${esc(doc.start)} ~ ${esc(doc.end)})</h2><table border="1" cellspacing="0" cellpadding="6"><thead><tr>${doc.columns.map(column => `<th>${esc(column)}</th>`).join('')}</tr></thead><tbody>${rows.map(row =>
+    `<tr><td>${esc(row.category)}</td><td>${htmlItems(row.this_week)}</td><td>${htmlItems(row.next_week)}</td><td>${row.notes.map(esc).join('<br>')}</td></tr>`).join('')}</tbody></table>`;
+  const markdown = [`## ${doc.title} (${doc.start} ~ ${doc.end})`, '', '| ' + doc.columns.join(' | ') + ' |', '|---|---|---|---|',
+    ...rows.map(row => '| ' + [row.category, mdItems(row.this_week), mdItems(row.next_week), row.notes.join('<br>')].map(cellText).join(' | ') + ' |')].join('\n') + '\n';
+  return {html, markdown};
+}
+
+async function copyWiki(reportId) {
+  const report = state.reports.find(r => r.id === reportId);
+  const {html, markdown} = wikiTables(JSON.parse(report.document));
+  try {
+    await navigator.clipboard.write([new ClipboardItem({
+      'text/html': new Blob([html], {type: 'text/html'}),
+      'text/plain': new Blob([markdown], {type: 'text/plain'}),
+    })]);
+  } catch (error) {
+    // 클립보드 API를 쓸 수 없는 환경에서는 Markdown만 복사합니다.
+    const area = document.createElement('textarea');
+    area.value = markdown;
+    document.body.appendChild(area);
+    area.select();
+    document.execCommand('copy');
+    area.remove();
+  }
+  notice('보고서를 WIKI 형식으로 복사했습니다. 위키 편집기에 붙여 넣으세요.');
+}
+
+document.addEventListener('click', event => {
+  const button = event.target.closest('button[data-wiki-copy]');
+  if (button) action(() => copyWiki(button.dataset.wikiCopy));
 });

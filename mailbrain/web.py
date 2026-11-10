@@ -133,6 +133,9 @@ def serve(cfg, store, pipeline, on_ready=None, health=None):
                 elif self.path == "/api/task/action":
                     result = store.task_action(data["id"], data["action"])
                     pipeline.wiki()
+                elif self.path == "/api/task/advance":
+                    result = store.advance_tasks(data.get("ids"))
+                    pipeline.wiki()
                 elif self.path == "/api/reply-draft":
                     rows = store.rows("SELECT t.title,t.summary,t.needs_reply,m.subject FROM tasks t JOIN messages m ON m.id=t.source_id WHERE t.id=? AND t.deleted_at IS NULL", (data.get("task_id"),))
                     if not rows:
