@@ -172,6 +172,47 @@ class WebTests(unittest.TestCase):
             self.request('/api/report-file?id=unknown',headers=headers)
         self.assertEqual(error.exception.code,404)
 
+    def test_task_action_and_report_item_endpoints(self):
+        from datetime import datetime
+        from mailbrain.core import KST
+        headers={"X-App-Token":self.token}
+        with self.request('/api/demo',{},headers) as response:json.load(response)
+        with self.request('/api/tasks',headers=headers) as response:tasks=json.load(response)
+        self.assertIn('stage_counts',tasks)
+        task=next(t for t in tasks['tasks'] if t['actions'])
+        with self.request('/api/task/action',{'id':task['id'],'action':task['actions'][0]},headers) as response:
+            self.assertTrue(json.load(response)['ok'])
+        with self.assertRaises(HTTPError) as error:
+            self.request('/api/task/action',{'id':task['id'],'action':'unknown'},headers)
+        self.assertEqual(error.exception.code,400)
+        today=datetime.now(KST).date().isoformat()
+        with self.request('/api/report',{'start':today,'end':today},headers) as response:report=json.load(response)
+        item=next(i for row in report['document']['rows'] for i in row['this_week'])
+        with self.request('/api/report/item',{'report_id':report['id'],'item_id':item['id'],'changes':{'points':['요약 수정']}},headers) as response:
+            edited=json.load(response)
+        self.assertIn('요약 수정',edited['content'])
+        with self.request('/reports.js') as response:
+            self.assertIn('renderReports',response.read().decode('utf-8'))
+
+    def test_bulk_topic_resolve_and_group_filter_endpoints(self):
+        headers={"X-App-Token":self.token}
+        from mailbrain.demo import messages
+        # 서버를 다른 테스트와 같이 쓰므로 이 테스트 전용 메일의 토픽만 처리합니다.
+        base=messages('me@example.com')[0]
+        mails=[{**base,'id':f'bulk-{n}','thread_id':f'bulk-thread-{n}','subject':f'[일괄] 처리 테스트 {n}번 자료'} for n in (1,2)]
+        with self.request('/api/import',{'messages':mails},headers) as response:json.load(response)
+        with self.request('/api/state',headers=headers) as response:state=json.load(response)
+        self.assertIn('work_counts',state)
+        ids=[g['id'] for g in state['topics'] if g['proposal_count'] and g['title'].startswith('[일괄]')]
+        self.assertEqual(len(ids),2)
+        with self.request('/api/resolve/topics',{'topic_ids':ids,'accept':True},headers) as response:result=json.load(response)
+        self.assertEqual(result['done'],len(ids))
+        with self.assertRaises(HTTPError) as error:
+            self.request('/api/resolve/topics',{'topic_ids':[],'accept':True},headers)
+        self.assertEqual(error.exception.code,400)
+        with self.request('/api/tasks?group=open',headers=headers) as response:tasks=json.load(response)
+        self.assertTrue(all(t['work_stage']!='처리완료' for t in tasks['tasks']))
+
     def test_solution_endpoint_requires_auth_and_returns_evidence(self):
         headers={"X-App-Token":self.token}
         with self.request('/api/demo',{},headers) as response:json.load(response)

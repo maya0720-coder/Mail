@@ -60,6 +60,8 @@ def serve(cfg, store, pipeline, on_ready=None, health=None):
                 return self.reply((ROOT / "static/tasks.js").read_text(encoding="utf-8"), kind="text/javascript; charset=utf-8")
             if route.path == "/solutions.js":
                 return self.reply((ROOT / "static/solutions.js").read_text(encoding="utf-8"), kind="text/javascript; charset=utf-8")
+            if route.path == "/reports.js":
+                return self.reply((ROOT / "static/reports.js").read_text(encoding="utf-8"), kind="text/javascript; charset=utf-8")
             if self.headers.get("X-App-Token") != token:
                 return self.reply({"error": "앱 화면을 새로고침하세요."}, 403)
             if route.path == "/api/state":
@@ -69,7 +71,7 @@ def serve(cfg, store, pipeline, on_ready=None, health=None):
             if route.path == "/api/tasks":
                 params = parse_qs(route.query)
                 try:
-                    filters = {key: params.get(key, [default])[0] for key, default in (("status",""),("query",""),("project",""),("start",""),("end",""),("scope","active"))}
+                    filters = {key: params.get(key, [default])[0] for key, default in (("status",""),("query",""),("project",""),("start",""),("end",""),("scope","active"),("kind",""),("stage",""),("group",""))}
                     return self.reply(store.list_tasks(**filters))
                 except ValueError as exc:
                     return self.reply({"error": str(exc)}, 400)
@@ -128,6 +130,9 @@ def serve(cfg, store, pipeline, on_ready=None, health=None):
                 elif self.path == "/api/task/read":
                     store.mark_task_read(data["id"])
                     result = {"ok": True}
+                elif self.path == "/api/task/action":
+                    result = store.task_action(data["id"], data["action"])
+                    pipeline.wiki()
                 elif self.path == "/api/reply-draft":
                     rows = store.rows("SELECT t.title,t.summary,t.needs_reply,m.subject FROM tasks t JOIN messages m ON m.id=t.source_id WHERE t.id=? AND t.deleted_at IS NULL", (data.get("task_id"),))
                     if not rows:
@@ -152,12 +157,19 @@ def serve(cfg, store, pipeline, on_ready=None, health=None):
                     store.resolve(data["id"], data["accept"], data.get("target_id"))
                     pipeline.wiki()
                     result = {"ok": True}
+                elif self.path == "/api/resolve/topics":
+                    if not isinstance(data.get("accept"), bool):
+                        raise ValueError("승인 여부는 참/거짓이어야 합니다.")
+                    result = store.resolve_topics(data.get("topic_ids"), data["accept"])
+                    pipeline.wiki()
                 elif self.path == "/api/search":
                     result = pipeline.search(data["query"])
                 elif self.path == "/api/history":
                     result = pipeline.history(data.get("query", ""), data.get("start") or None, data.get("end") or None, data.get("topic_id") or None)
                 elif self.path == "/api/report":
                     result = pipeline.report(data["start"], data["end"])
+                elif self.path == "/api/report/item":
+                    result = pipeline.edit_report_item(data["report_id"], data["item_id"], data.get("changes"), bool(data.get("delete")))
                 else:
                     return self.reply({"error": "없는 경로입니다."}, 404)
                 return self.reply(result)

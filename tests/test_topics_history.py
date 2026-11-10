@@ -20,6 +20,13 @@ class TopicsHistoryTests(unittest.TestCase):
         self.pipeline = Pipeline(self.cfg, self.store)
         self.mails = messages("me@example.com")
 
+    def confirm_all(self):
+        for proposal in self.store.state()["proposals"]:
+            self.store.resolve(proposal["id"], True)
+        for task in self.store.list_tasks()["tasks"]:
+            if "confirm" in task["actions"]:
+                self.store.task_action(task["id"], "confirm")
+
     def test_repeated_external_reply_prefix(self):
         self.assertEqual(clean_subject("[외부메일]Re: [외부메일]FW: QA 서버 시스템 카피 문의"), "QA 서버 시스템 카피 문의")
 
@@ -40,9 +47,11 @@ class TopicsHistoryTests(unittest.TestCase):
 
     def test_latest_business_mail_is_not_misclassified_from_old_approval_thread(self):
         older = {**self.mails[0], "id": "old-approval-word", "thread_id": "budget-thread",
+                 "sent_at": "2026-11-01T10:00:00+09:00", "received_at": "2026-11-01T10:00:00+09:00",
                  "subject": "[골프존]예산관리 개선 협의", "body": "전자결재 관련 과거 설명입니다. 확인 부탁드립니다."}
         latest = {**self.mails[1], "id": "latest-budget-request", "thread_id": "budget-thread",
                   "subject": "[골프존]예산관리 개선 협의", "sent_at": "2026-11-09T10:00:00+09:00",
+                  "received_at": "2026-11-09T10:00:00+09:00",
                   "body": "ZCOR0520 예산관리 화면에서 추가 생성 기능을 반영해 주세요."}
         self.pipeline.ingest([older, latest])
         topic = next(g for g in Topics(self.store).build() if g["id"])
@@ -105,6 +114,7 @@ class TopicsHistoryTests(unittest.TestCase):
                  "sent_at": today + "T10:00:00+09:00", "received_at": None,
                  "body": "요청한 자료 검토를 완료하고 결과를 회신했습니다."}
         self.pipeline.ingest([incoming, reply])
+        self.confirm_all()
         report = self.pipeline.report(today, today)
         source_ids = [mail_id for row in report["document"]["rows"] for item in row["this_week"] for mail_id in item["source_ids"]]
         self.assertIn(incoming["id"], source_ids)
@@ -167,25 +177,38 @@ class TopicsHistoryTests(unittest.TestCase):
     def test_report_matches_four_column_template_without_fake_completion(self):
         self.pipeline.ingest(self.mails)
         today=datetime.now(KST).date().isoformat()
+        unconfirmed=self.pipeline.report(today,today)["document"]
+        self.assertFalse(any(r["this_week"] or r["next_week"] for r in unconfirmed["rows"]))
+        self.confirm_all()
         report=self.pipeline.report(today,today)
         doc=report["document"]
         self.assertEqual(doc["columns"],["구분","업무 내용 (금주)","차주","비고"])
         self.assertEqual([r["category"] for r in doc["rows"]],CATEGORIES)
         self.assertEqual(report["completed_count"],0)
-        self.assertTrue(any(r["this_week"] for r in doc["rows"]))
+        items=[i for r in doc["rows"] for i in r["this_week"]]
+        self.assertTrue(items)
+        for item in items:
+            self.assertNotIn("status",item)
+            self.assertTrue(1<=len(item["points"])<=3 and all(len(p)<=60 for p in item["points"]))
+        self.assertNotIn("상태:",report["content"])
+        # 차주 계획은 금주 미완료 업무를 바탕으로 작성합니다.
+        self.assertEqual({i["title"] for r in doc["rows"] for i in r["next_week"]},{i["title"] for i in items})
         self.assertTrue((Path(self.temp.name)/"reports"/(report["id"]+".pdf")).read_bytes().startswith(b'%PDF'))
 
-    def test_report_does_not_include_future_mail(self):
+    def test_report_uses_confirmation_time_not_mail_time(self):
         today=datetime.now(KST).date()
         older=(today-timedelta(days=5)).isoformat()
         self.pipeline.ingest([{**self.mails[0],"received_at":older+'T09:00:00+09:00'},self.mails[2]])
-        report=self.pipeline.report(older,older)
+        self.confirm_all()
+        before=self.pipeline.report(older,older)
+        self.assertFalse(any(row["this_week"] for row in before["document"]["rows"]))
+        report=self.pipeline.report(today.isoformat(),today.isoformat())
         titles=[i["title"] for row in report["document"]["rows"] for i in row["this_week"]]
-        self.assertTrue(any('알파' in title for title in titles))
-        self.assertFalse(any('베타' in title for title in titles))
+        self.assertTrue(any('검토 자료' in title for title in titles))
 
     def test_report_excludes_auth_code_mail_but_keeps_business_login_issue(self):
         self.pipeline.ingest([{**self.mails[0],"subject":"임시 ChatGPT 로그인 코드","body":"인증 코드 123456"},{**self.mails[2],"subject":"SAP 로그인 오류 조치","body":"접속 오류 확인 바랍니다."}])
+        self.confirm_all()
         today=datetime.now(KST).date().isoformat()
         result=self.pipeline.report(today,today)
         self.assertNotIn('123456',result['content'])

@@ -3,6 +3,8 @@ import hashlib
 import json
 import re
 
+from .policy import personal_notice
+
 
 def clean_subject(subject):
     value = subject.strip()
@@ -31,10 +33,10 @@ CATEGORIES.append("재무/리스 업무")
 CATEGORIES.append("전자결재")
 
 
-def category(text):
+def category(text, sender="", cfg=None):
     value = text.lower()
-    from .policy import approval_kind
-    if approval_kind(text):
+    from .policy import approval_mail
+    if approval_mail(text, "", sender, cfg):
         return "전자결재"
     if "ifrs" in value:
         return CATEGORIES[4]
@@ -116,11 +118,15 @@ class Topics:
             latest = group[0]
             latest_text_mail = next((m for m in group if m.get("direction", "inbound") == "inbound"), latest)
             group_text = latest_text_mail["subject"] + " " + brief(new_body(latest_text_mail["body"]))
-            is_approval = category(group_text) == "전자결재"
+            policy_cfg = getattr(self.store, "policy_cfg", {})
+            topic_category = category(group_text, latest_text_mail.get("sender", ""), policy_cfg)
+            is_approval = topic_category == "전자결재"
+            # 생일 축하·로그인 보안 링크 메일은 [수집한 메일]에만 남기고 업무 화면에서는 뺍니다.
+            notice = not is_approval and personal_notice(latest_text_mail["subject"], new_body(latest_text_mail["body"]))
             lowered = group_text.lower()
             approval_status = ("결재 완료" if any(word in lowered for word in ("결재 완료", "결재완료", "승인 완료", "승인완료", "결재가 완료", "최종 승인", "approved", "approval completed")) else "진행 알림") if is_approval else None
             main_summary = next((m["summary"] for m in children if candidate_mail and m["id"] == candidate_mail["id"]), children[0]["summary"])
-            result.append({"id": identity, "title": title, "category": category(group_text), "approval_status": approval_status, "date_basis": children[0]["date_basis"],
+            result.append({"id": identity, "title": title, "category": topic_category, "approval_status": approval_status, "notice": notice, "date_basis": children[0]["date_basis"],
                            "latest_at": children[0]["received_at"], "latest_summary": main_summary,
                            "message_count": len(group), "proposal_count": sum(len(m["proposals"]) for m in children),
                            "messages": children})

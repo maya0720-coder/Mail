@@ -121,12 +121,13 @@ class PipelineTests(unittest.TestCase):
         self.assertNotEqual(self.store.state()["tasks"][0]["due_date"], "2027-01-01")
         self.assertEqual(len(self.store.state()["events"]), prior_events + 1)
 
-    def test_update_without_target_is_not_created(self):
+    def test_update_without_target_goes_to_thread_task_as_confirmed(self):
         self.pipeline.ingest([self.mails[1]])
-        with self.assertRaises(ValueError):
-            self.store.resolve(self.store.state()["proposals"][0]["id"], True)
-        self.assertEqual(len(self.store.state()["tasks"]), 1)
-        self.assertEqual(self.store.state()["tasks"][0]["auto_generated"], 1)
+        self.store.resolve(self.store.state()["proposals"][0]["id"], True)
+        tasks = self.store.list_tasks()["tasks"]
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]["auto_generated"], 1)
+        self.assertEqual((tasks[0]["work_kind"], tasks[0]["work_stage"]), ("일반업무", "확인완료"))
 
     def test_cancel_and_complete_proposals(self):
         task = self.accept_one()

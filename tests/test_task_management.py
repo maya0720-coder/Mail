@@ -153,4 +153,67 @@ class TaskManagementTests(unittest.TestCase):
         self.assertEqual(current['active_count'],0)
 
 
+    def stage(self, task_id):
+        task = next(t for t in self.store.list_tasks()['tasks'] if t['id'] == task_id)
+        return task['work_kind'], task['work_stage'], task['actions']
+
+    def test_general_work_follows_four_stage_buttons(self):
+        mail = {**self.mail, 'id': 'auto', 'thread_id': 'auto', 'subject': '[프로젝트A] 자료 검토 요청',
+                'body': '자료 검토 부탁드립니다. 업무: 자료 검토; 준비해주세요.'}
+        self.pipeline.ingest([mail])
+        task = next(t for t in self.store.list_tasks()['tasks'] if t['source_id'] == 'auto')
+        self.assertEqual(self.stage(task['id']), ('일반업무', '미확인', ['confirm']))
+        with self.assertRaises(ValueError):
+            self.store.task_action(task['id'], 'complete')
+        for action, expected, buttons in (('confirm', '확인완료', ['start']), ('start', '진행중', ['complete']),
+                                          ('complete', '처리완료', ['reopen']), ('reopen', '진행중', ['complete'])):
+            self.store.task_action(task['id'], action)
+            self.assertEqual(self.stage(task['id']), ('일반업무', expected, buttons))
+        kinds = [e['kind'] for e in self.store.rows("SELECT kind FROM events WHERE task_id=? ORDER BY seq", (task['id'],))]
+        self.assertEqual(kinds[-4:], ['확인', '진행', '처리완료', '재진행'])
+        self.assertIsNone(self.store.list_tasks()['tasks'][0]['completed_at'])
+
+    def test_approval_work_has_two_stages_and_reopen_returns_to_pending(self):
+        task = self.task('approval', '전자결재', '구매 결재 요청')
+        self.assertEqual(self.stage(task['id']), ('전자결재', '미처리', ['complete']))
+        with self.assertRaises(ValueError):
+            self.store.task_action(task['id'], 'start')
+        self.store.task_action(task['id'], 'complete')
+        self.assertEqual(self.stage(task['id']), ('전자결재', '처리완료', ['reopen']))
+        self.store.task_action(task['id'], 'reopen')
+        self.assertEqual(self.stage(task['id']), ('전자결재', '미처리', ['complete']))
+        result = self.store.list_tasks(kind='전자결재', stage='미처리')
+        self.assertEqual([t['id'] for t in result['tasks']], [task['id']])
+        self.assertEqual(result['stage_counts']['전자결재']['미처리'], 1)
+
+    def test_resolve_without_target_assigns_confirmed_stage(self):
+        task = self.task()
+        self.assertEqual(self.stage(task['id'])[:2], ('일반업무', '확인완료'))
+
+    def test_report_items_can_be_edited_and_deleted(self):
+        task = self.task()
+        self.store.task_action(task['id'], 'start')
+        today = datetime.now(KST).date().isoformat()
+        report = self.pipeline.report(today, today)
+        items = [i for row in report['document']['rows'] for i in row['this_week']]
+        self.assertEqual(len(items), 1)
+        item = items[0]
+        self.assertTrue(item['start'])
+        edited = self.pipeline.edit_report_item(report['id'], item['id'],
+                                                {'title': '자료 검토 정리', 'points': '- 초안 작성\n- 검토 의견 반영',
+                                                 'start': '2026-11-02', 'end': '2026-11-06'})
+        saved = [i for row in edited['document']['rows'] for i in row['this_week']][0]
+        self.assertEqual((saved['title'], saved['points'], saved['start'], saved['end']),
+                         ('자료 검토 정리', ['초안 작성', '검토 의견 반영'], '2026-11-02', '2026-11-06'))
+        self.assertIn('2026-11-02 ~ 2026-11-06', edited['content'])
+        with self.assertRaises(ValueError):
+            self.pipeline.edit_report_item(report['id'], item['id'], {'start': '2026-11-09', 'end': '2026-11-01'})
+        with self.assertRaises(ValueError):
+            self.pipeline.edit_report_item(report['id'], item['id'], {'status': '완료'})
+        next_item = [i for row in edited['document']['rows'] for i in row['next_week']][0]
+        self.pipeline.edit_report_item(report['id'], next_item['id'], delete=True)
+        stored = json.loads(self.store.rows("SELECT document FROM reports WHERE id=?", (report['id'],))[0]['document'])
+        self.assertFalse(any(row['next_week'] for row in stored['rows']))
+        self.assertTrue(any(row['this_week'] for row in stored['rows']))
+
 if __name__=='__main__':unittest.main()

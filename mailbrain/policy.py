@@ -1,8 +1,19 @@
 """메일 수집·조회에 공통 적용하는 발신자 제외 규칙."""
 import json
+import re
 from email.utils import getaddresses
 
 DEFAULT_EXCLUDED_SENDERS = {"no-reply@teams.mail.microsoft"}
+# 내용과 관계없이 전자결재로 분류하는 발신자. 설정의 approval_senders로 추가할 수 있습니다.
+DEFAULT_APPROVAL_SENDERS = {"batchjobserv@golfzon.com"}
+# 회신/전달 접두어 뒤의 [결재 진행]·[결재 완료] 제목 접두어
+APPROVAL_PREFIX = re.compile(
+    r"^\s*(?:(?:re|fw|fwd|회신|전달)\s*(?:\[\d+\])?\s*[:：]\s*|\[\s*(?:외부\s*메일|external)\s*\]\s*)*\[\s*결재\s*(?:진행|완료)\s*\]",
+    re.I)
+BIRTHDAY = re.compile(r"생일\s*(?:을|을\s*진심으로)?\s*축하|생신\s*(?:을)?\s*축하|happy\s*birthday|birthday\s*(?:wish|greeting|celebration)", re.I)
+SIGN_IN_SUBJECT = re.compile(r"로그인|sign[\s-]?in|log[\s-]?in|보안\s*링크|인증\s*링크|본인\s*(?:인증|확인)|magic\s*link|verify|verification|일회용|one[\s-]?time", re.I)
+SIGN_IN_LINK = re.compile(r"링크|link|https?://", re.I)
+BUSINESS_ISSUE = re.compile(r"SAP|ERP|오류|장애|이슈|개선|연동|권한\s*신청|error|issue", re.I)
 
 
 def sender_excluded(sender, cfg=None):
@@ -16,16 +27,45 @@ def sender_excluded(sender, cfg=None):
     return bool(actual) and actual.issubset(blocked)
 
 
+def mailbox(value):
+    return {address.strip().lower() for _, address in getaddresses([str(value or "")]) if "@" in address}
+
+
+def approval_senders(cfg=None):
+    configured = (cfg or {}).get("approval_senders", [])
+    if isinstance(configured, str):
+        configured = [configured]
+    return DEFAULT_APPROVAL_SENDERS | {str(value).strip().lower() for value in configured}
+
+
+def approval_mail(subject, body="", sender="", cfg=None):
+    """[결재 진행]·[결재 완료] 접두어나 결재 시스템 발신자는 다른 규칙보다 먼저 전자결재로 봅니다."""
+    if APPROVAL_PREFIX.match(str(subject or "")):
+        return True
+    if mailbox(sender) & approval_senders(cfg):
+        return True
+    return approval_kind(subject, body)
+
+
+def personal_notice(subject, body=""):
+    """생일 축하·로그인 보안 링크처럼 업무가 아닌 개인 알림 메일인지 판단합니다."""
+    subject, head = str(subject or ""), str(body or "")[:600]
+    if BIRTHDAY.search(subject) or BIRTHDAY.search(head):
+        return True
+    return bool(SIGN_IN_SUBJECT.search(subject) and SIGN_IN_LINK.search(subject + " " + head)
+                and not BUSINESS_ISSUE.search(subject))
+
+
 def approval_kind(subject, body=""):
     text = f"{subject or ''} {body or ''}".lower()
     approval_words = ("전자결재", "결재", "결재선", "승인 요청", "결재 요청", "결재 완료", "결재 진행", "approval", "approval request", "approved", "approval status")
     return any(word in text for word in approval_words)
 
 
-def noise_mail(subject, body="", sender=""):
+def noise_mail(subject, body="", sender="", cfg=None):
     """Hide obvious marketing and low-value automated notices from work views."""
     text = f"{subject or ''} {body or ''}".lower()
-    if approval_kind(subject, body):
+    if approval_mail(subject, body, sender, cfg):
         return False
     promotional = ("광고", "프로모션", "특가", "할인 쿠폰", "뉴스레터", "구독 해지", "수신 거부", "newsletter", "unsubscribe", "promotion", "special offer", "sale", "coupon", "marketing")
     if any(word in text for word in promotional):

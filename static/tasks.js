@@ -1,33 +1,290 @@
-/* 업무 상태·완료 시각·휴지통·복합 필터와 메뉴 안내. */
-let taskRequest=0,taskFilterTimer,menuToastTimer;
-const openTasks=new Set();
-const MENU_HELP={review:'같은 토픽의 메일 요약과 업무 후보를 펼쳐 보고 승인하거나 제외합니다.',tasks:'업무 상태와 완료일을 관리하고, 조건별 조회·삭제·복원을 할 수 있습니다.',mails:'최근 수신일순으로 묶인 토픽을 펼쳐 메일 요약과 원문을 확인합니다.',search:'수집된 메일의 단어와 관련 스레드를 찾아 원문 근거를 확인합니다.',worklog:'RAG로 관련 근거를 찾고 메일·업무 변경을 일자별 타임라인으로 확인합니다.',reports:'기간을 선택해 금주·차주·비고 양식의 보고서 초안을 만들고 PDF로 받습니다.',history:'상태 변경·완료·삭제·복원의 전후 값과 근거를 확인합니다.',runs:'메일 수집·분석·검색·보고의 실행 결과와 오류를 확인합니다.'};
-function showMenuToast(name){const toast=$('menu-toast');clearTimeout(menuToastTimer);toast.textContent=MENU_HELP[name]||'';toast.classList.add('show');toast.setAttribute('aria-hidden','false');menuToastTimer=setTimeout(()=>{toast.classList.remove('show');toast.setAttribute('aria-hidden','true')},4200)}
-function taskRow(t,states,trash){
- const processed=['??','??'].includes(t.status);
- return `<details class="task-item ${processed?'is-completed':''}" data-task-item="${esc(t.id)}" ${openTasks.has(t.id)?'open':''}><summary><span class="topic-chevron">?</span><span class="task-title"><b>${esc(t.display_title||t.title)} ${t.auto_generated&&!t.read_at?'<i class="unread-tag">\uD655\uC778\uD544\uC694</i>':''}</b><small>${esc(t.project)} ? ${esc(t.assignee||'\uB2F4\uB2F9 \uBBF8\uC815')}</small></span><span class="task-state ${processed?'done':''}">${esc(t.status)}</span><span class="task-date">${trash?'\uC0AD\uC81C '+esc(fmt(t.deleted_at)):processed?'\uCC98\uB9AC '+(t.completed_at?esc(fmt(t.completed_at)):'\uC2DC\uAC01 \uBBF8\uD655\uC778'):'\uAE30\uD55C '+esc(t.due_date||'\uBBF8\uC815')}</span></summary><div class="task-expanded"><div class="task-primary-actions">${t.auto_generated&&!t.read_at?`<button data-task-read="${esc(t.id)}" class="primary">\uD655\uC778</button>`:''}${t.needs_reply?`<button data-reply-task="${esc(t.id)}">\uD68C\uC2E0 \uCD08\uC548</button>`:''}${source(t.source_id)}${trash?`<button data-task-restore="${esc(t.id)}">\uC5C5\uBB34 \uBCF5\uC6D0</button>`:processed?`<button data-task-reopen="${esc(t.id)}">\uCC98\uB9AC\uBBF8\uC644\uB8CC</button>`:`<button class="primary" data-task-complete="${esc(t.id)}">\uCC98\uB9AC\uC644\uB8CC</button>`}</div>${t.summary&&!trash?`<p class="task-summary">${esc(t.summary)}</p>`:''}${!trash?`<div class="task-solution-slot" data-task-solution-slot="${esc(t.id)}"></div>`:''}${trash?`<p class="subtle">\uC0AD\uC81C \uC804 \uC0C1\uD0DC\uC640 \uC644\uB8CC \uC2DC\uAC01\uC744 \uBCF4\uC874\uD569\uB2C8\uB2E4. \uBCF5\uC6D0\uD558\uBA74 \uC77C\uBC18 \uC5C5\uBB34\uC5D0 \uD45C\uC2DC\uB429\uB2C8\uB2E4.</p>`:`<details class="task-edit"><summary>\uC0C1\uD0DC\u00B7\uAE30\uD55C \uC218\uC815 \uBC0F \uC0AD\uC81C</summary><div class="task-controls"><label>\uC0C1\uD0DC<select id="status-${t.id}">${states.map(s=>`<option ${s===t.status?'selected':''}>${s}</option>`).join('')}</select></label><label>\uAE30\uD55C<input id="due-${t.id}" type="date" value="${esc(t.due_date||'')}"></label><button data-save="${t.id}">\uBCC0\uACBD \uC800\uC7A5</button><button class="danger" data-task-delete="${t.id}">\uD734\uC9C0\uD1B5\uC73C\uB85C \uC774\uB3D9</button></div></details>`}</div></details>`
-}
-function taskDisplayTitle(title,summary=''){const text=`${title||''} ${summary||''}`.toLowerCase();if(text.includes('리스')&&(text.includes('스케줄')||text.includes('스케쥴')))return '리스 스케줄 조정';return String(title||'제목 없는 업무').replace(/^\s*\[[^\]]+\]\s*/,'').replace(/^\s*(?:re|fw|fwd)\s*[:：]\s*/i,'').replace(/\s*(?:요청(?:의\s*건|\s*건)?|문의(?:의\s*건|\s*건)?|협조(?:의\s*건|\s*요청)?|의\s*건)\s*$/i,'').trim()||'제목 없는 업무'}
-function taskCategory(title,summary=''){const text=`${title||''} ${summary||''}`.toLowerCase();if(/전자결재|결재 요청|승인 요청|approval/.test(text))return '전자결재';if(text.includes('리스')&&/(스케줄|스케쥴|계약|임대)/.test(text))return '재무/리스 업무';if(text.includes('ifrs'))return 'IFRS18 업무 지원';if(/펌뱅킹|\bfcm\b|은행|송금/.test(text))return '펌뱅킹';if(/\bai\b|데이터 솔루션|인공지능/.test(text))return 'AI 데이터 업무 지원';if(/유지보수|노츠|보안 패치|rfc 계정|취약/.test(text))return 'SAP ERP 운영 유지보수 관리';if(/개선|예산|고도화/.test(text))return 'SAP ERP 개선 과제';if(/sap|erp|서버|카피|전표/.test(text))return 'SAP ERP 이슈 및 조치';return '상시업무'}
-function taskTopicKey(title){return String(title||'').replace(/^\s*\[[^\]]+\]\s*/,'').replace(/^\s*(?:re|fw|fwd)\s*(?:\[\d+\])?\s*[:：]\s*/i,'').replace(/\s*(?:요청(?:의\s*건|\s*건)?|문의(?:의\s*건|\s*건)?|협조(?:의\s*건|\s*요청)?|의\s*건)\s*$/i,'').replace(/\s+/g,' ').trim().toLocaleLowerCase('ko-KR')||String(title||'').toLowerCase()}
-function groupedTaskMarkup(items,states,trash){
- const categories=new Map();
- for(const task of items){
-  const view={...task,category:task.category||taskCategory(task.title,task.summary),display_title:task.display_title||taskDisplayTitle(task.title,task.summary),topic_title:task.topic_title||String(task.title||'\uC81C\uBAA9 \uC5C6\uB294 \uC5C5\uBB34'),topic_message_count:task.topic_message_count||1,topic_summary:task.topic_summary||task.summary||'',thread_messages:task.thread_messages||[]};
-  const category=view.category;if(!categories.has(category))categories.set(category,new Map());
-  const topics=categories.get(category),key=view.topic_id||taskTopicKey(view.topic_title);
-  if(!topics.has(key))topics.set(key,{title:view.topic_title,messageCount:view.topic_message_count,summary:view.topic_summary,threadMessages:view.thread_messages,tasks:[]});
-  topics.get(key).tasks.push(view);
- }
- return [...categories].map(([category,topics])=>`<section class="task-category"><h3 class="task-category-heading">${esc(category)} <small>${[...topics.values()].reduce((n,t)=>n+t.tasks.length,0)}\uAC1C</small></h3>${[...topics].map(([id,topic])=>`<details class="task-topic-group" data-task-topic="${esc(id)}"><summary><b>${esc(topic.title)}</b><small>\uBA54\uC77C ${topic.messageCount}\uAC74 &middot; \uC5C5\uBB34 ${topic.tasks.length}\uAC74</small></summary><div class="task-topic-items"><p class="task-summary">${esc(topic.summary)}</p>${topic.threadMessages.length>1?`<details class="task-thread-meta"><summary>\uC5F0\uACB0\uB41C \uBA54\uC77C ${topic.threadMessages.length}\uAC74</summary>${topic.threadMessages.map(mail=>`<article><b>${esc(mail.subject)}</b><small>${esc(fmt(mail.received_at||mail.sent_at))} &middot; ${esc(mail.sender)}</small>${source(mail.id)}</article>`).join('')}</details>`:''}${topic.tasks.map(task=>taskRow(task,states,trash)).join('')}</div></details>`).join('')}</section>`).join('')
-}
-async function markAutoTaskRead(task){try{await api('/api/task/read',{id:task.id});openTasks.add(String(task.id));notice('업무를 확인 완료로 분류했습니다.');await refresh()}catch(error){notice(error.message,true)}}
-async function renderTasks(){const request=++taskRequest;const selected=$('task-project').value;const projects=[...new Set(state.tasks.map(t=>t.project))].sort();$('task-project').innerHTML='<option value="">전체 프로젝트</option>'+projects.map(p=>`<option value="${esc(p)}">${esc(p)}</option>`).join('');$('task-project').value=projects.includes(selected)?selected:'';const params=new URLSearchParams({status:$('filter').value,query:$('task-query').value,project:$('task-project').value,scope:$('task-scope').value,start:$('task-completed-start').value,end:$('task-completed-end').value});try{const r=await api('/api/tasks?'+params);if(request!==taskRequest)return;$('task-result-count').textContent=`선택 조건 ${r.filtered_count}건`;$('task-status-summary').innerHTML=r.states.map(s=>`<button data-task-status="${esc(s)}" class="${$('filter').value===s?'selected':''}">${esc(s)} <b>${r.counts[s]||0}</b></button>`).join('');const trash=$('task-scope').value==='deleted';const ordered=[...r.tasks].sort((a,b)=>Number(!!(b.auto_generated&&!b.read_at))-Number(!!(a.auto_generated&&!a.read_at)));const unreadIds=new Set(ordered.filter(t=>Number(t.auto_generated)===1&&!t.read_at).map(t=>String(t.id)));const unread=ordered.filter(t=>unreadIds.has(String(t.id))),read=ordered.filter(t=>!unreadIds.has(String(t.id)));if(unread.length+read.length<ordered.length)read.push(...ordered.filter(t=>!unreadIds.has(String(t.id))&&!read.some(item=>item.id===t.id)));if(!unread.length&&!read.length&&ordered.length)read.push(...ordered);$('task-list').innerHTML=r.tasks.length?(trash?groupedTaskMarkup(ordered,r.states,true):`${unread.length?`<h3 class="task-group-title" data-task-heading="unread">확인 필요 <span data-task-count>${unread.length}</span></h3><div class="task-collection unread-collection" data-task-group="unread">${groupedTaskMarkup(unread,r.states,false)}</div>`:''}${read.length?`<h3 class="task-group-title" data-task-heading="read">확인 완료 <span data-task-count>${read.length}</span></h3><div class="task-collection read-collection" data-task-group="read">${groupedTaskMarkup(read,r.states,false)}</div>`:''}`):empty(trash?'조건에 맞는 삭제 업무가 없습니다':'선택 조건에 맞는 업무가 없습니다',trash?'삭제한 업무와 변경 이력은 보존되며 이곳에서 복원할 수 있습니다.':'상태·검색어·완료일을 바꾸거나 필터를 초기화하세요.');$('task-list').querySelectorAll('[data-task-item]').forEach(el=>el.addEventListener('toggle',()=>{if(el.open){openTasks.add(el.dataset.taskItem);if(!trash)openTaskSolution(el.dataset.taskItem)}else openTasks.delete(el.dataset.taskItem)}));if(!trash)$('task-list').querySelectorAll('[data-task-item][open]').forEach(el=>openTaskSolution(el.dataset.taskItem));const count=[$('task-project').value,$('task-completed-start').value,$('task-completed-end').value,$('task-scope').value==='deleted'].filter(Boolean).length;$('advanced-filter-count').textContent=count?`${count}개 적용`:''}catch(e){if(request===taskRequest){$('task-list').innerHTML=empty('필터를 확인하세요',e.message);$('task-result-count').textContent='';notice(e.message,true)}}}
-for(const id of ['filter','task-project','task-scope','task-completed-start','task-completed-end'])$(id).onchange=()=>action(renderTasks);
-$('task-query').oninput=()=>{clearTimeout(taskFilterTimer);taskFilterTimer=setTimeout(renderTasks,220)};
-$('task-filter-reset').onclick=()=>action(async()=>{for(const id of ['filter','task-project','task-query','task-completed-start','task-completed-end'])$(id).value='';$('task-scope').value='active';await renderTasks()});
-document.addEventListener('click',e=>{const button=e.target.closest('button');if(!button)return;if(button.dataset.tab)showMenuToast(button.dataset.tab);if(button.dataset.taskStatus){$('filter').value=$('filter').value===button.dataset.taskStatus?'':button.dataset.taskStatus;action(renderTasks)}const operation=button.dataset.taskDelete?'delete':button.dataset.taskRestore?'restore':button.dataset.taskComplete?'complete':button.dataset.taskReopen?'reopen':null;if(!operation)return;const id=button.dataset.taskDelete||button.dataset.taskRestore||button.dataset.taskComplete||button.dataset.taskReopen;action(async()=>{if(operation==='delete'||operation==='restore'){await api('/api/task/'+operation,{id});notice(operation==='delete'?'업무를 휴지통으로 이동했습니다. 변경 이력은 유지됩니다.':'업무를 복원했습니다. 일반 업무에서 확인할 수 있습니다.')}else{await api('/api/task',{id,changes:{status:operation==='complete'?'완료':'진행중'}});notice(operation==='complete'?'완료 처리하고 완료 시각을 기록했습니다.':'다시 진행중으로 변경했습니다. 이전 완료 이력은 유지됩니다.')}await refresh()})});
+/* 내 업무: 처리 유형(일반업무/전자결재)과 처리 단계로만 관리합니다. 메뉴 안내 토스트도 이 파일에 있습니다. */
+let taskRequest = 0, taskFilterTimer, menuToastTimer;
+const openTasks = new Set();
 
-document.addEventListener('click',e=>{const b=e.target.closest('button[data-task-read]');if(!b)return;const task=state.tasks.find(t=>t.id===b.dataset.taskRead),row=b.closest('[data-task-item]');if(task&&row)markAutoTaskRead(task)});
-$('reply-close').onclick=()=>$('reply-dialog').close();$('reply-copy').onclick=async()=>{try{await navigator.clipboard.writeText($('reply-text').value);$('reply-copy').textContent='\uBCF5\uC0AC\uB428';setTimeout(()=>$('reply-copy').textContent='\uBCF5\uC0AC',1600)}catch(e){$('reply-text').select();document.execCommand('copy')}};
-document.addEventListener('click',e=>{const b=e.target.closest('button[data-reply-task]');if(!b)return;action(async()=>{const r=await api('/api/reply-draft',{task_id:b.dataset.replyTask});$('reply-subject').textContent=r.subject;$('reply-text').value=r.draft;$('reply-dialog').showModal()})});
+const MENU_HELP = {
+  review: '같은 토픽의 메일 요약과 업무 후보를 펼쳐 보고 [업무에 반영]하거나 제외합니다.',
+  tasks: '일반업무는 미확인 → 확인완료 → 진행중 → 처리완료, 전자결재는 미처리 → 처리완료 순서로 관리합니다.',
+  mails: '최근 수신일순으로 묶인 토픽을 펼쳐 메일 요약과 원문을 확인합니다.',
+  search: '수집된 메일의 단어와 관련 스레드를 찾아 원문 근거를 확인합니다.',
+  worklog: 'RAG로 관련 근거를 찾고 메일·업무 변경을 일자별 타임라인으로 확인합니다.',
+  reports: '내 업무에서 확정된 업무로 금주·차주 보고서를 만들고, 항목별로 수정·삭제한 뒤 PDF로 받습니다.',
+  history: '상태 변경·완료·삭제·복원의 전후 값과 근거를 확인합니다.',
+  runs: '메일 수집·분석·검색·보고의 실행 결과와 오류를 확인합니다.',
+};
+
+const STAGE_LABELS = {
+  일반업무: {미확인: '미확인 업무', 확인완료: '미처리 업무(확인완료)', 진행중: '진행중', 처리완료: '처리완료'},
+  전자결재: {미처리: '미처리 업무', 처리완료: '처리완료'},
+};
+const ACTION_LABELS = {confirm: '확인', start: '진행', complete: '처리 완료', reopen: '재진행'};
+const ACTION_NOTICES = {
+  confirm: '확인완료(미처리) 업무로 옮겼습니다.',
+  start: '진행중으로 변경했습니다.',
+  complete: '처리완료로 변경하고 처리 시각을 기록했습니다.',
+  reopen: '다시 진행하도록 되돌렸습니다. 이전 처리 이력은 유지됩니다.',
+};
+
+function showMenuToast(name) {
+  const toast = $('menu-toast');
+  clearTimeout(menuToastTimer);
+  toast.textContent = MENU_HELP[name] || '';
+  toast.classList.add('show');
+  toast.setAttribute('aria-hidden', 'false');
+  menuToastTimer = setTimeout(() => {
+    toast.classList.remove('show');
+    toast.setAttribute('aria-hidden', 'true');
+  }, 4200);
+}
+
+function stageLabel(kind, stage) {
+  return (STAGE_LABELS[kind] || {})[stage] || stage;
+}
+
+function taskDateText(task, trash) {
+  if (trash) return '삭제 ' + fmt(task.deleted_at);
+  if (task.work_stage === '처리완료') return '처리 ' + (task.completed_at ? fmt(task.completed_at) : '시각 미확인');
+  return '기한 ' + (task.due_date || '미정');
+}
+
+function taskRow(task, trash) {
+  const done = task.work_stage === '처리완료';
+  const actions = trash
+    ? `<button data-task-restore="${esc(task.id)}">업무 복원</button>`
+    : (task.actions || []).map(action =>
+        `<button class="${action === 'reopen' ? '' : 'primary'}" data-task-action="${esc(action)}" data-task-id="${esc(task.id)}">${esc(ACTION_LABELS[action] || action)}</button>`).join('');
+  const reply = task.needs_reply && !trash ? `<button data-reply-task="${esc(task.id)}">회신 초안</button>` : '';
+  const edit = trash
+    ? '<p class="subtle">삭제 전 상태와 처리 시각을 보존합니다. 복원하면 일반 목록에 표시됩니다.</p>'
+    : `<details class="task-edit"><summary>기한 수정 및 삭제</summary><div class="task-controls">
+         <label>기한<input id="due-${esc(task.id)}" type="date" value="${esc(task.due_date || '')}"></label>
+         <button data-save="${esc(task.id)}">기한 저장</button>
+         <button class="danger" data-task-delete="${esc(task.id)}">휴지통으로 이동</button></div></details>`;
+  return `<details class="task-item ${done ? 'is-completed' : ''}" data-task-item="${esc(task.id)}" ${openTasks.has(String(task.id)) ? 'open' : ''}>
+    <summary><span class="topic-chevron">›</span>
+      <span class="task-title"><b>${esc(task.display_title || task.title)}</b><small>${esc(task.assignee || '담당 미정')}</small></span>
+      <span class="task-state ${done ? 'done' : ''}">${esc(stageLabel(task.work_kind, task.work_stage))}</span>
+      <span class="task-date">${esc(taskDateText(task, trash))}</span>
+    </summary>
+    <div class="task-expanded">
+      <div class="task-primary-actions">${actions}${reply}${source(task.source_id)}</div>
+      ${task.summary && !trash ? `<p class="task-summary">${esc(task.summary)}</p>` : ''}
+      ${edit}
+    </div></details>`;
+}
+
+// 같은 메일 대화의 업무는 한 묶음으로 보여줍니다. 과제(IFRS18·SAP 등) 구분은 표시하지 않습니다.
+function topicGroups(tasks, trash) {
+  const groups = new Map();
+  for (const task of tasks) {
+    const key = task.topic_id || 'task-' + task.id;
+    if (!groups.has(key)) {
+      groups.set(key, {title: task.topic_title || task.title || '제목 없는 업무', messageCount: task.topic_message_count || 1,
+                       summary: task.topic_summary || task.summary || '', threadMessages: task.thread_messages || [], tasks: []});
+    }
+    groups.get(key).tasks.push(task);
+  }
+  return [...groups].map(([key, group]) => {
+    if (group.tasks.length === 1 && group.threadMessages.length <= 1) return taskRow(group.tasks[0], trash);
+    const thread = group.threadMessages.length > 1
+      ? `<details class="task-thread-meta"><summary>연결된 메일 ${group.threadMessages.length}건</summary>${group.threadMessages.map(mail =>
+          `<article><b>${esc(mail.subject)}</b><small>${esc(fmt(mail.received_at || mail.sent_at))} &middot; ${esc(mail.sender)}</small>${source(mail.id)}</article>`).join('')}</details>`
+      : '';
+    return `<details class="task-topic-group" data-task-topic="${esc(key)}" open>
+      <summary><b>${esc(group.title)}</b><small>메일 ${group.messageCount}건 &middot; 업무 ${group.tasks.length}건</small></summary>
+      <div class="task-topic-items">${thread}${group.tasks.map(task => taskRow(task, trash)).join('')}</div></details>`;
+  }).join('');
+}
+
+// 처리 유형·단계 묶음은 펼치거나 접을 수 있고, 접은 상태는 이 브라우저에 기억합니다.
+const STAGE_NUMBERS = ['①', '②', '③', '④'];
+const closedSections = new Set((() => {
+  try { return JSON.parse(localStorage.getItem('mailbrain.closedSections') || '[]'); } catch (error) { return []; }
+})());
+
+function saveClosedSections() {
+  try { localStorage.setItem('mailbrain.closedSections', JSON.stringify([...closedSections])); } catch (error) { /* 저장소를 쓸 수 없어도 화면은 동작합니다. */ }
+}
+
+function stageSections(tasks, stages, {kindFilter = '', showEmpty = false} = {}) {
+  return Object.entries(stages).map(([kind, kindStages]) => {
+    if (kindFilter && kindFilter !== kind) return '';
+    const ofKind = tasks.filter(task => task.work_kind === kind);
+    if (!ofKind.length && !showEmpty) return '';
+    const sections = kindStages.map((stage, index) => {
+      const items = ofKind.filter(task => task.work_stage === stage);
+      if (!items.length && !showEmpty) return '';
+      const key = 'stage:' + kind + ':' + stage;
+      return `<details class="task-stage" data-task-stage="${esc(kind + ':' + stage)}" data-section="${esc(key)}" ${closedSections.has(key) ? '' : 'open'}>
+        <summary class="task-stage-heading"><span class="topic-chevron">›</span>${esc(STAGE_NUMBERS[index] + ' ' + stageLabel(kind, stage))} <span data-task-count>${items.length}</span></summary>
+        ${items.length ? topicGroups(items, false) : '<p class="subtle task-stage-empty">해당 업무가 없습니다.</p>'}</details>`;
+    }).join('');
+    const key = 'kind:' + kind;
+    return `<details class="task-kind" data-task-kind="${esc(kind)}" data-section="${esc(key)}" ${closedSections.has(key) ? '' : 'open'}>
+      <summary class="task-group-title"><span class="topic-chevron">›</span>${esc(kind)} <span data-task-count>${ofKind.length}</span></summary>${sections}</details>`;
+  }).join('');
+}
+
+function stageOptions(stages, kind, selected) {
+  const options = [];
+  for (const [name, list] of Object.entries(stages)) {
+    if (kind && kind !== name) continue;
+    for (const stage of list) {
+      const value = name + ':' + stage;
+      options.push(`<option value="${esc(value)}" ${value === selected ? 'selected' : ''}>${esc(name + ' · ' + stageLabel(name, stage))}</option>`);
+    }
+  }
+  const groups = Object.entries(GROUP_LABELS).map(([value, label]) =>
+    `<option value="${esc(value)}" ${value === selected ? 'selected' : ''}>${esc(label)}</option>`).join('');
+  return '<option value="">전체 단계</option>' + groups + options.join('');
+}
+
+// 상단 요약의 [진행할 업무]·[완료한 업무]를 누르면 쓰는 묶음 필터입니다.
+const GROUP_LABELS = {'group:open': '진행할 업무 전체(처리완료 전)', 'group:done': '완료한 업무 전체(처리완료)'};
+
+let selectedStage = '';
+
+// 상단 요약 숫자를 누르면 해당 화면으로 이동해 대상만 걸러 보여줍니다.
+function openSummary(target) {
+  if (target === 'mail') {
+    mailCategory = 'all';
+    document.querySelectorAll('[data-mail-category]').forEach(x => x.classList.toggle('selected', x.dataset.mailCategory === 'all'));
+    selectTab('mails');
+    renderMails();
+    notice('수집한 메일 전체를 표시합니다.');
+  } else if (target === 'review') {
+    selectTab('review');
+    notice('처리할 업무 후보가 있는 토픽만 표시합니다.');
+  } else {
+    selectedStage = 'group:' + target;
+    for (const id of ['task-kind', 'task-query', 'task-completed-start', 'task-completed-end']) $(id).value = '';
+    $('task-scope').value = 'active';
+    selectTab('tasks');
+    action(renderTasks);
+    notice(`${GROUP_LABELS[selectedStage]} 필터를 적용했습니다. [필터 해제]로 전체 업무를 다시 볼 수 있습니다.`);
+  }
+}
+
+async function renderTasks() {
+  const request = ++taskRequest;
+  const kind = $('task-kind').value;
+  const grouped = selectedStage.startsWith('group:');
+  if (kind && selectedStage && !grouped && !selectedStage.startsWith(kind + ':')) selectedStage = '';
+  const [stageKind, stage] = grouped ? ['', ''] : (selectedStage || ':').split(':');
+  const params = new URLSearchParams({
+    query: $('task-query').value, scope: $('task-scope').value,
+    start: $('task-completed-start').value, end: $('task-completed-end').value,
+    kind: kind || stageKind || '', stage: stage || '', group: grouped ? selectedStage.slice(6) : '',
+  });
+  try {
+    const result = await api('/api/tasks?' + params);
+    if (request !== taskRequest) return;
+    const trash = $('task-scope').value === 'deleted';
+    $('filter').innerHTML = stageOptions(result.stages, kind, selectedStage);
+    const filterLabel = GROUP_LABELS[selectedStage] || (selectedStage ? selectedStage.replace(':', ' · ') : '');
+    $('task-result-count').innerHTML = `선택 조건 ${result.filtered_count}건` + (filterLabel
+      ? ` <span class="active-filter">${esc(filterLabel)} <button class="link-button" data-clear-stage>필터 해제</button></span>` : '');
+    $('task-status-summary').innerHTML = Object.entries(result.stage_counts).map(([name, counts]) =>
+      `<div class="task-stage-chips"><b>${esc(name)}</b>${Object.entries(counts).map(([key, count]) => {
+        const value = name + ':' + key;
+        return `<button data-task-status="${esc(value)}" class="${selectedStage === value ? 'selected' : ''}">${esc(stageLabel(name, key))} <b>${count}</b></button>`;
+      }).join('')}</div>`).join('');
+    $('task-list').innerHTML = result.tasks.length
+      ? (trash ? topicGroups(result.tasks, true) : stageSections(result.tasks, result.stages, {kindFilter: kind, showEmpty: !selectedStage}))
+      : empty(trash ? '조건에 맞는 삭제 업무가 없습니다' : '선택 조건에 맞는 업무가 없습니다',
+              trash ? '삭제한 업무와 변경 이력은 보존되며 이곳에서 복원할 수 있습니다.' : '처리 유형·단계·검색어를 바꾸거나 필터를 초기화하세요.');
+    $('task-list').querySelectorAll('[data-task-item]').forEach(element => element.addEventListener('toggle', () => {
+      if (element.open) openTasks.add(element.dataset.taskItem);
+      else openTasks.delete(element.dataset.taskItem);
+    }));
+    $('task-list').querySelectorAll('[data-section]').forEach(element => element.addEventListener('toggle', () => {
+      if (element.open) closedSections.delete(element.dataset.section);
+      else closedSections.add(element.dataset.section);
+      saveClosedSections();
+    }));
+    const advanced = [$('task-completed-start').value, $('task-completed-end').value, trash].filter(Boolean).length;
+    $('advanced-filter-count').textContent = advanced ? `${advanced}개 적용` : '';
+  } catch (error) {
+    if (request !== taskRequest) return;
+    $('task-list').innerHTML = empty('필터를 확인하세요', error.message);
+    $('task-result-count').textContent = '';
+    notice(error.message, true);
+  }
+}
+
+for (const id of ['task-kind', 'task-scope', 'task-completed-start', 'task-completed-end']) $(id).onchange = () => action(renderTasks);
+$('filter').onchange = () => {
+  selectedStage = $('filter').value;
+  action(renderTasks);
+};
+$('task-query').oninput = () => {
+  clearTimeout(taskFilterTimer);
+  taskFilterTimer = setTimeout(renderTasks, 220);
+};
+$('task-filter-reset').onclick = () => action(async () => {
+  for (const id of ['task-kind', 'task-query', 'task-completed-start', 'task-completed-end']) $(id).value = '';
+  selectedStage = '';
+  $('task-scope').value = 'active';
+  await renderTasks();
+});
+
+document.addEventListener('click', event => {
+  const button = event.target.closest('button');
+  if (!button) return;
+  if (button.dataset.tab) showMenuToast(button.dataset.tab);
+  if (button.dataset.summary) {
+    openSummary(button.dataset.summary);
+    return;
+  }
+  if (button.dataset.clearStage !== undefined) {
+    selectedStage = '';
+    action(renderTasks);
+    return;
+  }
+  if (button.dataset.taskStatus) {
+    selectedStage = selectedStage === button.dataset.taskStatus ? '' : button.dataset.taskStatus;
+    $('task-kind').value = '';
+    action(renderTasks);
+    return;
+  }
+  if (button.dataset.taskAction) {
+    const id = button.dataset.taskId, operation = button.dataset.taskAction;
+    action(async () => {
+      await api('/api/task/action', {id, action: operation});
+      openTasks.add(String(id));
+      notice(ACTION_NOTICES[operation] || '업무 상태를 변경했습니다.');
+      await refresh();
+    });
+    return;
+  }
+  const operation = button.dataset.taskDelete ? 'delete' : button.dataset.taskRestore ? 'restore' : null;
+  if (!operation) return;
+  const id = button.dataset.taskDelete || button.dataset.taskRestore;
+  action(async () => {
+    await api('/api/task/' + operation, {id});
+    notice(operation === 'delete' ? '업무를 휴지통으로 이동했습니다. 변경 이력은 유지됩니다.' : '업무를 복원했습니다. 일반 목록에서 확인할 수 있습니다.');
+    await refresh();
+  });
+});
+
+$('reply-close').onclick = () => $('reply-dialog').close();
+$('reply-copy').onclick = async () => {
+  try {
+    await navigator.clipboard.writeText($('reply-text').value);
+    $('reply-copy').textContent = '복사됨';
+    setTimeout(() => $('reply-copy').textContent = '복사', 1600);
+  } catch (error) {
+    $('reply-text').select();
+    document.execCommand('copy');
+  }
+};
+document.addEventListener('click', event => {
+  const button = event.target.closest('button[data-reply-task]');
+  if (!button) return;
+  action(async () => {
+    const result = await api('/api/reply-draft', {task_id: button.dataset.replyTask});
+    $('reply-subject').textContent = result.subject;
+    $('reply-text').value = result.draft;
+    $('reply-dialog').showModal();
+  });
+});

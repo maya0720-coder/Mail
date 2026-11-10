@@ -32,6 +32,42 @@ def canonical_status(value):
     return STATUS_ALIASES.get(value, value)
 
 
+# 내 업무는 처리 유형(일반업무/전자결재)과 처리 단계로만 관리합니다.
+# DB의 상세 상태값(미등록·등록완료·진행중·대기·완료·취소)은 이력 호환을 위해 유지하고,
+# 화면과 보고서는 아래 단계로 변환해 사용합니다.
+WORK_STAGES = {"일반업무": ["미확인", "확인완료", "진행중", "처리완료"], "전자결재": ["미처리", "처리완료"]}
+# 단계별로 허용하는 버튼 동작과 동작 후 DB 상태값
+TASK_ACTIONS = {
+    "일반업무": {"미확인": {"confirm": "등록완료"}, "확인완료": {"start": "진행중"},
+               "진행중": {"complete": "완료"}, "처리완료": {"reopen": "진행중"}},
+    "전자결재": {"미처리": {"complete": "완료"}, "처리완료": {"reopen": "등록완료"}},
+}
+ACTION_KINDS = {"confirm": "확인", "start": "진행", "complete": "처리완료", "reopen": "재진행"}
+
+
+def work_kind(category_name):
+    return "전자결재" if category_name == "전자결재" else "일반업무"
+
+
+def work_stage(task, kind):
+    status = canonical_status(task.get("status"))
+    if status in {"완료", "취소"}:
+        return "처리완료"
+    if kind == "전자결재":
+        return "미처리"
+    if status in {"진행중", "대기"}:
+        return "진행중"
+    if status == "미등록" or (int(task.get("auto_generated") or 0) and not task.get("read_at")):
+        return "미확인"
+    return "확인완료"
+
+
+def work_confirmed(task, kind):
+    """주간 보고에 반영할 '확정' 업무: 일반업무는 확인완료 이상, 전자결재는 처리완료."""
+    stage = work_stage(task, kind)
+    return stage == "처리완료" if kind == "전자결재" else stage != "미확인"
+
+
 def canonical_task(task):
     # Older automatic-task refresh events stored partial snapshots. Normalize
     # them before reports replay events so existing databases remain readable.
@@ -111,6 +147,8 @@ class Store:
     def __init__(self, folder):
         self.folder = Path(folder)
         self.folder.mkdir(parents=True, exist_ok=True)
+        # 전자결재 발신자 등 화면 분류에 쓰는 설정. Pipeline이 실제 설정으로 바꿉니다.
+        self.policy_cfg = {}
         with self.connect() as db:
             db.executescript("""
                 PRAGMA journal_mode=WAL;
@@ -173,9 +211,11 @@ class Store:
 
     def apply_message_policy(self, cfg):
         from .policy import sender_excluded, noise_mail
+        if cfg:
+            self.policy_cfg = cfg
         with self.connect() as db:
             for mail in db.execute("SELECT id,sender,subject,body,excluded FROM messages").fetchall():
-                if (sender_excluded(mail["sender"], cfg) or noise_mail(mail["subject"], mail["body"], mail["sender"])) and not mail["excluded"]:
+                if (sender_excluded(mail["sender"], cfg) or noise_mail(mail["subject"], mail["body"], mail["sender"], cfg)) and not mail["excluded"]:
                     db.execute("UPDATE messages SET excluded=1 WHERE id=?", (mail["id"],))
 
     def bind_owner(self, email):
@@ -202,11 +242,18 @@ class Store:
 
     def state(self):
         from .topics import Topics
+        topics = Topics(self).build()
+        mapping = {message["id"]: topic for topic in topics for message in topic["messages"]}
+        tasks = self.annotate_tasks(self.rows("SELECT * FROM tasks WHERE deleted_at IS NULL"), mapping)
+        stage_counts = self.stage_counts(tasks)
         return {
+            # 상단 요약 숫자: 개인 알림 메일을 뺀 내 업무 기준입니다.
+            "work_counts": {"open": sum(n for counts in stage_counts.values() for stage, n in counts.items() if stage != "처리완료"),
+                            "done": sum(counts["처리완료"] for counts in stage_counts.values())},
             "message_count": self.rows("SELECT count(*) AS n FROM messages WHERE excluded=0")[0]["n"],
             "excluded_message_count": self.rows("SELECT count(*) AS n FROM messages WHERE excluded=1")[0]["n"],
             "messages": self.rows("SELECT id,subject,sender,sent_at,received_at,summary,source FROM messages WHERE excluded=0 ORDER BY COALESCE(received_at,sent_at) DESC LIMIT 300"),
-            "topics": Topics(self).summaries(),
+            "topics": [{k: v for k, v in topic.items() if k != "messages"} for topic in topics],
             "tasks": self.rows("SELECT * FROM tasks ORDER BY updated_at DESC"),
             "proposals": self.rows("SELECT p.* FROM proposals p JOIN messages m ON p.source_id=m.id WHERE p.state='대기' AND m.excluded=0 ORDER BY p.rowid"),
             "events": self.rows("SELECT * FROM events ORDER BY seq DESC LIMIT 200"),
@@ -222,8 +269,8 @@ class Store:
             new["completed_at"] = old.get("completed_at") if old["status"] == "완료" else new["updated_at"]
         else:
             new["completed_at"] = None
-        db.execute("UPDATE tasks SET title=?,project=?,assignee=?,due_date=?,status=?,updated_at=?,manual=?,completed_at=?,deleted_at=? WHERE id=?",
-                   (new["title"], new["project"], new["assignee"], new["due_date"], new["status"], new["updated_at"], new["manual"], new["completed_at"], new["deleted_at"], target))
+        db.execute("UPDATE tasks SET title=?,project=?,assignee=?,due_date=?,status=?,updated_at=?,manual=?,completed_at=?,deleted_at=?,read_at=? WHERE id=?",
+                   (new["title"], new["project"], new["assignee"], new["due_date"], new["status"], new["updated_at"], new["manual"], new["completed_at"], new["deleted_at"], new.get("read_at"), target))
         db.execute("INSERT INTO events(task_id,kind,before_json,after_json,source_id,actor,at) VALUES(?,?,?,?,?,?,?)",
                    (target, kind, dump(old), dump(new), source_id, actor, now()))
 
@@ -253,9 +300,15 @@ class Store:
                 raise ValueError("복원할 삭제 업무를 찾지 못했습니다.")
             self.change(db, task_id, {"deleted_at": None, "manual": 1}, "사용자", kind="복원")
 
-    def list_tasks(self, status="", query="", project="", start="", end="", scope="active"):
+    def list_tasks(self, status="", query="", project="", start="", end="", scope="active", kind="", stage="", group=""):
+        if group not in {"", "open", "done"}:
+            raise ValueError("업무 묶음 필터가 올바르지 않습니다.")
         if status and status not in STATES:
             raise ValueError("업무 상태 필터가 올바르지 않습니다.")
+        if kind and kind not in WORK_STAGES:
+            raise ValueError("처리 유형 필터가 올바르지 않습니다.")
+        if stage and stage not in {s for stages in WORK_STAGES.values() for s in stages}:
+            raise ValueError("처리 단계 필터가 올바르지 않습니다.")
         if scope not in {"active", "deleted"}:
             raise ValueError("목록 범위가 올바르지 않습니다.")
         if len(query) > 200 or len(project) > 200:
@@ -282,16 +335,33 @@ class Store:
             conditions.append("substr(completed_at,1,10)<=?")
             params.append(end)
         tasks = self.rows("SELECT * FROM tasks WHERE " + " AND ".join(conditions) + " ORDER BY updated_at DESC,id", params)
-        # Attach existing thread topics to task rows so the UI can group work
-        # by conversation and category instead of rendering unrelated flat rows.
-        from .topics import Topics, task_title
-        topic_by_message = {}
-        for topic in Topics(self).build():
-            for message in topic["messages"]:
-                topic_by_message[message["id"]] = topic
+        tasks = self.annotate_tasks(tasks, self.topic_by_message())
+        stage_counts = self.stage_counts(tasks)
+        if group == "open":
+            tasks = [task for task in tasks if task["work_stage"] != "처리완료"]
+        elif group == "done":
+            tasks = [task for task in tasks if task["work_stage"] == "처리완료"]
+        if kind:
+            tasks = [task for task in tasks if task["work_kind"] == kind]
+        if stage:
+            tasks = [task for task in tasks if task["work_stage"] == stage]
+        counts = {s: 0 for s in STATE_ORDER}
+        scope_where = "deleted_at IS NULL" if scope == "active" else "deleted_at IS NOT NULL"
+        for row in self.rows("SELECT status,count(*) AS n FROM tasks WHERE " + scope_where + " GROUP BY status"):
+            counts[row["status"]] = row["n"]
+        return {"tasks": tasks, "counts": counts, "filtered_count": len(tasks), "states": STATE_ORDER,
+                "stages": WORK_STAGES, "stage_counts": stage_counts}
+
+    def annotate_tasks(self, tasks, topic_by_message):
+        """업무에 대화(토픽)·처리 유형·단계를 붙이고, 생일 축하·로그인 보안 링크 같은 개인 알림 업무는 뺍니다."""
+        from .topics import task_title
+        from .policy import personal_notice
+        result = []
         for task in tasks:
             topic = topic_by_message.get(task.get("source_id"))
             if topic:
+                if topic.get("notice"):
+                    continue
                 task["topic_id"] = topic["id"]
                 task["topic_title"] = topic["title"]
                 task["category"] = topic["category"]
@@ -302,6 +372,8 @@ class Store:
                                             for message in topic["messages"]]
                 task["display_title"] = task_title(topic["title"], topic["latest_summary"])
             else:
+                if personal_notice(task.get("title"), task.get("summary")):
+                    continue
                 task["topic_id"] = "task-" + str(task["id"])
                 task["topic_title"] = task.get("title") or "제목 없는 업무"
                 task["category"] = "상시업무"
@@ -310,20 +382,52 @@ class Store:
                 task["topic_summary"] = task.get("summary") or ""
                 task["thread_messages"] = []
                 task["display_title"] = task_title(task["title"] or "제목 없는 업무")
-            processed = task["status"] in {"완료", "취소"}
-            if task["category"] == "전자결재":
-                task["work_bucket"] = "전자결재 처리완료" if processed else "전자결재 처리미완료"
-            elif processed:
-                task["work_bucket"] = "처리완료"
-            elif int(task.get("auto_generated") or 0) and not task.get("read_at"):
-                task["work_bucket"] = "확인필요"
-            else:
-                task["work_bucket"] = "확인완료(미처리)"
-        counts = {s: 0 for s in STATE_ORDER}
-        scope_where = "deleted_at IS NULL" if scope == "active" else "deleted_at IS NOT NULL"
-        for row in self.rows("SELECT status,count(*) AS n FROM tasks WHERE " + scope_where + " GROUP BY status"):
-            counts[row["status"]] = row["n"]
-        return {"tasks": tasks, "counts": counts, "filtered_count": len(tasks), "states": STATE_ORDER}
+            task["work_kind"] = work_kind(task["category"])
+            task["work_stage"] = work_stage(task, task["work_kind"])
+            task["actions"] = list(TASK_ACTIONS[task["work_kind"]].get(task["work_stage"], {}))
+            result.append(task)
+        return result
+
+    @staticmethod
+    def stage_counts(tasks):
+        counts = {kind: {stage: 0 for stage in stages} for kind, stages in WORK_STAGES.items()}
+        for task in tasks:
+            counts[task["work_kind"]][task["work_stage"]] += 1
+        return counts
+
+    def topic_by_message(self):
+        from .topics import Topics
+        mapping = {}
+        for topic in Topics(self).build():
+            for message in topic["messages"]:
+                mapping[message["id"]] = topic
+        return mapping
+
+    def task_kind(self, task, topics=None):
+        from .topics import category
+        topic = (topics if topics is not None else self.topic_by_message()).get(task.get("source_id"))
+        return work_kind(topic["category"] if topic else category(f"{task.get('project') or ''} {task.get('title') or ''}"))
+
+    def task_action(self, task_id, action):
+        if action not in ACTION_KINDS:
+            raise ValueError("업무 처리 동작이 올바르지 않습니다.")
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM tasks WHERE id=? AND deleted_at IS NULL", (task_id,)).fetchone()
+        if not row:
+            raise ValueError("업무를 찾지 못했습니다.")
+        task = dict(row)
+        kind = self.task_kind(task)
+        stage = work_stage(task, kind)
+        allowed = TASK_ACTIONS[kind].get(stage, {})
+        if action not in allowed:
+            raise ValueError(f"{kind}의 '{stage}' 단계에서는 이 동작을 할 수 없습니다.")
+        changes = {"status": allowed[action], "manual": 1}
+        if not task.get("read_at"):
+            changes["read_at"] = now()
+        with self.connect() as db:
+            # 상태 전환 시각은 events에 기록되어 재진행 이력도 남습니다.
+            self.change(db, task_id, changes, "사용자", kind=ACTION_KINDS[action])
+        return {"ok": True, "work_kind": kind, "work_stage": work_stage({**task, **changes}, kind)}
 
     def resolve(self, proposal_id, accept, target_id=None):
         with self.connect() as db:
@@ -347,18 +451,41 @@ class Store:
                         changes = {k: payload[k] for k in ("title", "project", "due_date", "assignee") if payload.get(k) is not None}
                     changes["manual"] = 1
                     self.change(db, target, changes, "사용자승인", row["source_id"], "메일반영")
-                elif row["action"] == "CREATE":
-                    automatic = db.execute("SELECT t.* FROM tasks t JOIN messages tm ON tm.id=t.source_id JOIN messages sm ON sm.thread_id=tm.thread_id WHERE sm.id=? AND t.auto_generated=1 AND t.deleted_at IS NULL ORDER BY t.created_at,t.id LIMIT 1", (row["source_id"],)).fetchone()
-                    if automatic:
+                else:
+                    # 대상 업무를 고르지 않으면 같은 대화의 기존 업무(자동 등록 우선)에 반영하고,
+                    # 없으면 새 업무로 만듭니다. 결과는 내 업무의 '미처리(확인완료)' 단계입니다.
+                    existing = db.execute("SELECT t.* FROM tasks t JOIN messages tm ON tm.id=t.source_id JOIN messages sm ON sm.thread_id=tm.thread_id WHERE sm.id=? AND t.deleted_at IS NULL ORDER BY t.auto_generated DESC,t.created_at,t.id LIMIT 1", (row["source_id"],)).fetchone()
+                    if existing:
                         changes = {k: payload[k] for k in ("title", "project", "due_date", "assignee") if payload.get(k) is not None}
-                        changes["status"] = "등록완료"
+                        if existing["status"] == "미등록":
+                            changes["status"] = "등록완료"
+                        changes["read_at"] = existing["read_at"] or now()
                         changes["manual"] = 1
-                        self.change(db, automatic["id"], changes, "사용자승인", row["source_id"], "메일반영")
+                        self.change(db, existing["id"], changes, "사용자승인", row["source_id"], "메일반영")
                     else:
                         self.create_task(db, payload, row["source_id"], confirmed=True)
-                else:
-                    raise ValueError("변경할 대상 업무를 선택하세요.")
             db.execute("UPDATE proposals SET state=? WHERE id=?", ("승인" if accept else "제외", proposal_id))
+
+    def resolve_topics(self, topic_ids, accept):
+        """확인함에서 체크한 토픽의 대기 후보를 한 번에 반영하거나 제외합니다. 건별 실패는 모아서 돌려줍니다."""
+        if not isinstance(topic_ids, list) or not topic_ids or len(topic_ids) > 200 or not all(isinstance(x, str) for x in topic_ids):
+            raise ValueError("처리할 토픽을 1~200개 선택하세요.")
+        from .topics import Topics
+        topics = {topic["id"]: topic for topic in Topics(self).build()}
+        done, failed = 0, []
+        for topic_id in dict.fromkeys(topic_ids):
+            topic = topics.get(topic_id)
+            proposals = [p["id"] for m in (topic or {}).get("messages", []) for p in m["proposals"]]
+            if not proposals:
+                failed.append({"topic_id": topic_id, "title": (topic or {}).get("title", ""), "error": "처리할 업무 후보가 없습니다."})
+                continue
+            try:
+                for proposal_id in proposals:
+                    self.resolve(proposal_id, accept)
+                done += 1
+            except ValueError as exc:
+                failed.append({"topic_id": topic_id, "title": topic["title"], "error": str(exc)})
+        return {"done": done, "failed": failed}
 
     def create_task(self, db, item, source, confirmed=False):
         timestamp = now()
@@ -390,9 +517,16 @@ class Store:
 
     def mark_task_read(self, task_id):
         with self.connect() as db:
-            cursor = db.execute("UPDATE tasks SET read_at=? WHERE id=? AND deleted_at IS NULL AND read_at IS NULL", (now(), task_id))
-            if not cursor.rowcount and not db.execute("SELECT 1 FROM tasks WHERE id=? AND deleted_at IS NULL", (task_id,)).fetchone():
+            task = db.execute("SELECT * FROM tasks WHERE id=? AND deleted_at IS NULL", (task_id,)).fetchone()
+            if not task:
                 raise ValueError("읽음 처리할 업무를 찾지 못했습니다.")
+            if task["read_at"] and task["status"] != "미등록":
+                return
+            # 확인 시각을 이벤트로 남겨 주간 보고의 '확정' 판단에 사용합니다.
+            changes = {"read_at": task["read_at"] or now()}
+            if task["status"] == "미등록":
+                changes["status"] = "등록완료"
+            self.change(db, task_id, changes, "사용자", kind="확인")
 
     def mark_task_unprocessed(self, task_id):
         with self.connect() as db:
@@ -767,7 +901,7 @@ class Pipeline:
             for raw in messages:
                 try:
                     from .policy import sender_excluded, noise_mail, task_recipient
-                    if isinstance(raw, dict) and (sender_excluded(raw.get("sender"), self.cfg) or noise_mail(raw.get("subject"), raw.get("body"), raw.get("sender"))):
+                    if isinstance(raw, dict) and (sender_excluded(raw.get("sender"), self.cfg) or noise_mail(raw.get("subject"), raw.get("body"), raw.get("sender"), self.cfg)):
                         counts["excluded"] += 1
                         continue
                     message = normalize_message(raw, self.cfg)
@@ -928,23 +1062,19 @@ class Pipeline:
         completed = [t for k, t in snapshot.items() if k in completed_ids]
         active = [t for t in snapshot.values() if t["status"] not in {"완료", "취소"}]
         overdue = [t for t in active if t["due_date"] and t["due_date"] < end]
-        def listing(items):
-            return [f"- {t['title']} — {t['status']}, 기한 {t['due_date'] or '미정'} [업무:{t['id']}] [메일:{t['source_id']}]" for t in items] or ["- 해당 없음"]
-        lines = [f"# 주간 업무 보고 ({start} ~ {end})", "", "작성 시각: " + cutoff,
-                 "", "집계 기준: 앱에 기록된 이벤트 시각(KST), 종료일 시점 상태 복원. 메일 발송일과 다를 수 있습니다.",
-                 "", f"완료 {len(completed)}건 · 진행/대기 {len(active)}건 · 기한 경과 {len(overdue)}건", "", "## 완료 업무", *listing(completed),
-                 "", "## 진행 중 및 이월 업무", *listing(active), "", "## 지연·위험", *listing(overdue),
-                 "", "## 다음 주 계획", "- 미완료 업무의 기한과 우선순위를 검토해 확정하세요.", "", "## 기간 내 변경 이력"]
-        lines += [f"- {e['at']}: {e['kind']} / 업무 {e['task_id']} / 근거 {e['source_id'] or '사용자 직접 확인'}" for e in changes] or ["- 해당 없음"]
-        engine = Engine(self.cfg)
-        narrative = engine.role("06_report", {"period": [start, end], "completed": completed, "active": active, "overdue": overdue, "changes": changes})
-        if narrative:
-            lines += ["", "## AI 보고 해설 — 확정 전 검토", dump(narrative)]
-        content = "\n".join(lines) + "\n"
         report_id = uuid.uuid4().hex[:12]
         from .reporting import build_document, markdown, write_pdf
+        # 주간 보고에는 내 업무에서 확정된 업무만 들어갑니다(build_document 참고).
         document = build_document(self.store, self.cfg, start, end, snapshot, changes, len(completed))
-        content = markdown(document) + "\n" + content
+        engine = Engine(self.cfg)
+        narrative = engine.role("06_report", {"period": [start, end], "rows": [
+            {"category": row["category"], "this_week": [{k: i[k] for k in ("title", "points", "start", "end")} for i in row["this_week"]],
+             "next_week": [{k: i[k] for k in ("title", "points", "start", "end")} for i in row["next_week"]]}
+            for row in document["rows"] if row["this_week"] or row["next_week"]]})
+        if narrative:
+            document["narrative"] = dump(narrative)
+        document["id"] = report_id
+        content = markdown(document)
         folder = self.store.folder / "reports"
         folder.mkdir(exist_ok=True)
         write_pdf(document, folder / (report_id + ".pdf"))
@@ -952,3 +1082,55 @@ class Pipeline:
             db.execute("INSERT INTO reports(id,start_date,end_date,cutoff,content,document) VALUES(?,?,?,?,?,?)", (report_id, start, end, cutoff, content, dump(document)))
         (folder / f"{start}_{end}_{report_id}.md").write_text(content, encoding="utf-8")
         return {"id": report_id, "content": content, "document": document, "completed_count": len(completed), "active_count": len(active)}
+
+    def edit_report_item(self, report_id, item_id, changes=None, delete=False):
+        """주간 보고 항목을 수정하거나 삭제하고 Markdown·PDF를 다시 만듭니다."""
+        rows = self.store.rows("SELECT * FROM reports WHERE id=?", (report_id,))
+        if not rows or not rows[0]["document"]:
+            raise ValueError("수정할 수 있는 보고서를 찾지 못했습니다. 보고서를 다시 생성하세요.")
+        document = json.loads(rows[0]["document"])
+        found = None
+        for row in document["rows"]:
+            for section in ("this_week", "next_week"):
+                for index, item in enumerate(row[section]):
+                    if item.get("id") == item_id:
+                        found = (row[section], index, item)
+        if not found:
+            raise ValueError("보고서 항목을 찾지 못했습니다.")
+        items, index, item = found
+        if delete:
+            items.pop(index)
+        else:
+            if not isinstance(changes, dict) or not changes or set(changes) - {"title", "points", "start", "end"}:
+                raise ValueError("수정 항목이 올바르지 않습니다.")
+            if "title" in changes:
+                title = str(changes["title"] or "").strip()
+                if not title or len(title) > 200:
+                    raise ValueError("업무명은 1~200자로 입력하세요.")
+                item["title"] = title
+            if "points" in changes:
+                values = changes["points"].splitlines() if isinstance(changes["points"], str) else changes["points"]
+                if not isinstance(values, list):
+                    raise ValueError("요약 항목 형식이 올바르지 않습니다.")
+                points = [str(value).strip().lstrip("-·• ").strip() for value in values]
+                points = [value for value in points if value]
+                if not points or len(points) > 10 or any(len(value) > 200 for value in points):
+                    raise ValueError("요약 항목은 1~10개, 각 200자 이하로 입력하세요.")
+                item["points"] = points
+            for key in ("start", "end"):
+                if key in changes:
+                    value = changes[key] or None
+                    if value:
+                        date.fromisoformat(value)
+                    item[key] = value
+            if item.get("start") and item.get("end") and item["start"] > item["end"]:
+                raise ValueError("기간의 시작일은 종료일보다 늦을 수 없습니다.")
+        from .reporting import markdown, write_pdf
+        content = markdown(document)
+        folder = self.store.folder / "reports"
+        folder.mkdir(exist_ok=True)
+        write_pdf(document, folder / (report_id + ".pdf"))
+        with self.store.connect() as db:
+            db.execute("UPDATE reports SET content=?,document=? WHERE id=?", (content, dump(document), report_id))
+        (folder / f"{rows[0]['start_date']}_{rows[0]['end_date']}_{report_id}.md").write_text(content, encoding="utf-8")
+        return {"id": report_id, "document": document, "content": content}
